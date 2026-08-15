@@ -1,95 +1,110 @@
 # xgen-graphstore
 
-백엔드 중립 **온톨로지 그래프 저장소** — `OntologyStore` 인터페이스 + Fuseki 구현.
-XGEN Python 서비스가 라이브러리로 의존하는 **공유 커널**(HTTP 서비스 아님 — [ADR-001](docs/ADR-001-shared-kernel.md)).
+Backend-neutral **ontology graph store** — the `OntologyStore` seam plus a Fuseki implementation.
+A **shared kernel** that XGEN Python services depend on as a library (not an HTTP service — see [ADR-001](docs/ADR-001-shared-kernel.md)).
 
-- 코어 의존: `httpx` 만. 호출 계측(call-logging)은 주입식 no-op 기본(`set_call_timer`).
-- 목적: RDF(Fuseki) ↔ LPG(Neo4j/AGE) 저장소를 **빌더/구현만 갈아끼워** 교체 가능하게.
+- Core dependency: `httpx` only. Call instrumentation (call-logging) defaults to an injectable no-op (`set_call_timer`).
+- Goal: make the RDF (Fuseki) ↔ LPG (Neo4j/AGE) store **swappable by replacing the builders/implementation only**.
 
-## Provenance (이력 단절 보상)
+## Provenance (history-break compensation)
 
-`xgen-documents`의 다음 모듈에서 이관:
-- `service/ontology/fuseki_client.py` → `transport.py` (call_logger 의존만 주입식 no-op로 치환)
-- `service/ontology/fuseki_queries.py` → `queries.py` (무변경)
-- `service/ontology/fuseki_backend.py` → `backend.py` (import 경로만)
-- `service/ontology/ontology_store.py` → `store.py` (무변경)
+Extracted from these `xgen-documents` modules:
+- `service/ontology/fuseki_client.py` → `transport.py` (only the `call_logger` dependency swapped for an injectable no-op)
+- `service/ontology/fuseki_queries.py` → `queries.py` (verbatim + provenance banner comment)
+- `service/ontology/fuseki_backend.py` → `backend.py` (import paths repointed only)
+- `service/ontology/ontology_store.py` → `store.py` (verbatim)
 
-출처 커밋: **`8a81e23`** (documents `feature/ontology-store-b1`, 2층 이관 완료 시점).
-이관 경위·게이트·심판 전문: `company/xgen-levelup/docs/온톨로지_저장소_추상화_이관_원장_2026_08_15.md`.
+Source commit: **`8a81e23`** (documents `feature/ontology-store-b1`, at the 2nd-layer migration-complete point).
+Full migration history, gates, and adversarial-judge records: `company/xgen-levelup/docs/온톨로지_저장소_추상화_이관_원장_2026_08_15.md`.
 
-## 사용
+## Usage
 
 ```python
 from xgen_graphstore import create_store
 
-store = create_store({"backend": "fuseki"})   # 설정 생략 시 env(FUSEKI_URL 등)
+store = create_store({"backend": "fuseki"})   # config omitted → read from env (FUSEKI_URL, etc.)
 counts = await store.class_instance_counts(graph_iri)
 ```
 
-CLI (기존 메서드 표면 노출만):
+CLI (surfaces existing methods only — no new capability). The `graphstore` console script is
+provided after `pip install -e .`; without an install, invoke the module directly:
 
 ```
-graphstore health
+graphstore health                         # or: python -m xgen_graphstore.cli health
 graphstore ensure-dataset
 graphstore count <graph-iri>
-graphstore snapshot-hash <graph-iri>     # 정렬 (s,p,o) sha256 — 마이그레이션 전후 등가 확인
+graphstore snapshot-hash <graph-iri>      # sorted (s,p,o) sha256 — verify pre/post-migration equivalence
 ```
 
-## 계약표 — 메서드 × R/W × LPG 이식 난이도
+Connection config comes from env (`FUSEKI_URL`, etc.) or `--base-url/--dataset/--username/--password`.
 
-`T`=TRIVIAL · `M`=MODERATE · `H`=HARD (LPG/Cypher 재작성 난이도). H 상세는 [DEBTS.md](docs/DEBTS.md).
+## The contract surface — methods × R/W × LPG portability
 
-| 메서드 | R/W | LPG | 비고 |
+`T`=TRIVIAL · `M`=MODERATE · `H`=HARD (LPG/Cypher rewrite difficulty). H details in [DEBTS.md](docs/DEBTS.md).
+
+> **Note on the `OntologyStore` Protocol.** The `store.py` Protocol currently *formally* declares the
+> five core read methods (`node_properties`, `property_values`, `neighbors`, `triple_exists`,
+> `count_node_triples`); the full contract below is the **`FusekiBackend` method surface** and is
+> satisfied structurally (duck-typed). Promoting the Protocol to the enforced full contract — so a
+> future `Neo4jBackend` is checked against every method — is tracked as the first task for **0.2.0**
+> (see [DEBTS.md §G-Protocol](docs/DEBTS.md)). Until then this table, not the Protocol, is the source of truth.
+
+| Method | R/W | LPG | Notes |
 |---|---|---|---|
-| `node_properties` | R | T | 노드 datatype 속성 |
-| `property_values` | R | T/M | 속성=노드키 매핑 |
-| `neighbors` | R | M | 1홉 이웃 |
-| `triple_exists` | R | T/M | ASK → LPG는 MERGE/EXISTS |
-| `count_node_triples` | R | T | subject∪object |
-| `class_instance_counts` | R | M | GROUP BY, owl:Class 관례 |
-| `relation_triple_counts` | R | M | 인스턴스간 술어 집계 |
-| `community_edges` / `community_labels` | R | M | 간선/라벨 스캔 |
-| `seed_chunk_relations` | R | M | VALUES 바인딩(→파라미터, 부채 아님) |
-| `predicate_labels` | R | M | 순수 SPARQL |
-| `seed_relations_by_fulltext_forward`/`reverse` | R | **H** | text:query(jena-text), 임계 15 |
-| `seed_connectivity_relations` | R | **H** | text:query, 임계 80 |
-| `seed_relations_broad` | R | **H** | text:query, 임계 60 |
-| `seed_classes_by_fulltext` | R | **H** | text:query, 임계 30, GROUP_CONCAT |
-| `insert_data` / `delete_data` | W | M | ASK 멱등가드는 호출부 |
-| `delete_node_subject_side`/`object_side` | W | T/M | 양면 DELETE(LPG=DETACH DELETE) |
+| `node_properties` | R | T | Node datatype properties |
+| `property_values` | R | T/M | Property → node-key mapping |
+| `neighbors` | R | M | One-hop neighbors |
+| `triple_exists` | R | T/M | ASK → LPG uses MERGE/EXISTS |
+| `count_node_triples` | R | T | subject ∪ object |
+| `class_instance_counts` | R | M | GROUP BY, owl:Class convention |
+| `relation_triple_counts` | R | M | Predicate aggregation between instances |
+| `community_edges` / `community_labels` | R | M | Edge/label scan |
+| `seed_chunk_relations` | R | M | VALUES binding (→ parameters, not a debt) |
+| `predicate_labels` | R | M | Pure SPARQL |
+| `seed_relations_by_fulltext_forward`/`reverse` | R | **H** | text:query (jena-text), threshold 15 |
+| `seed_connectivity_relations` | R | **H** | text:query, threshold 80 |
+| `seed_relations_broad` | R | **H** | text:query, threshold 60 |
+| `seed_classes_by_fulltext` | R | **H** | text:query, threshold 30, GROUP_CONCAT |
+| `insert_data` / `delete_data` | W | M | ASK idempotency guard lives at the call site |
+| `delete_node_subject_side`/`object_side` | W | T/M | Two-sided DELETE (LPG = DETACH DELETE) |
 | `tag_communities` | W | M | DELETE→INSERT, named graph |
-| `merge_move_subject`/`object` | W | **H** | 2면 triple 이동(LPG=apoc.mergeNodes) |
+| `merge_move_subject`/`object` | W | **H** | Two-sided triple move (LPG = apoc.mergeNodes) |
 | `merge_normalized_instances_labels` / `same_label_nodes` | R | M | ko-label SELECT |
-| `rename_move_subject`/`object`/`rename_drop_old_label` | W | **H** | 라벨기준 3단계 이동 |
-| `upload_ttl` | W | **H** | Turtle(LPG=CSV/UNWIND) |
-| `commit_staged_graph` / `get_ingest_commit_marker` | W/R | **H** | named graph staging/control |
-| `clear_graph` | W | M | CLEAR SILENT(named graph) |
+| `rename_move_subject`/`object`/`rename_drop_old_label` | W | **H** | Label-based three-step move |
+| `upload_ttl` | W | **H** | Turtle (LPG = CSV/UNWIND) |
+| `commit_staged_graph` / `get_ingest_commit_marker` | W/R | **H** | Named-graph staging/control |
+| `clear_graph` | W | M | CLEAR SILENT (named graph) |
 | `clean_subclassof_noise` / `materialize_property_inheritance` | W | **H** | OWL/RDFS-as-data |
-| `get_tbox_schema` / `get_graph_data_for_visualization` | R | **H** | OWL/RDFS 스키마-as-data |
+| `get_tbox_schema` / `get_graph_data_for_visualization` | R | **H** | OWL/RDFS schema-as-data |
 | `count_classes` / `count_properties` / `get_triple_count` | R | T/M | |
-| `health_check` / `ensure_dataset` | R/W | M | admin |
+| `health_check` / `ensure_dataset` | R/W | M | Admin |
+| `sparql_query` / `sparql_update` | R/W | — | Raw transport escape hatch (kept from the client) |
 
-## 테스트
+## Tests
 
 ```
-pytest -m "not live"    # CI 기본 — 봉인 골든 + 목-transport 파싱 등가
-pytest -m live          # 실제 Fuseki 필요(FUSEKI_URL). B4/B5 왕복 스모크
+pytest -m "not live"    # CI default — sealed golden + mock-transport parse-equivalence (9 tests)
+pytest -m live          # requires a real Fuseki (FUSEKI_URL). B4/B5 roundtrip smoke (2 tests)
 ```
 
-## 로드맵
+Verified against Apache Jena Fuseki 5.1.0 (2026-08-16): mock 9/9, live 2/2,
+and the CLI (`health`/`count`/`snapshot-hash`, deterministic hash) end-to-end.
 
-- **0.1.0** (현재): 팩토리 + Fuseki 백엔드 + CLI.
-- **0.2.0**: Neo4j 백엔드 = **3층 착수**(DEBTS.md의 H 항목 재작성).
-- **0.3.0**: 라우터(dual-write·테넌트 분기) — 두 번째 백엔드 위에서만([ADR-002](docs/ADR-002-router-deferred.md)).
+## Roadmap
 
-## 머지 게이트 (라이브 스모크 — 청산됨 2026-08-16)
+- **0.1.0** (current): factory + Fuseki backend + CLI.
+- **0.2.0**: Neo4j backend = **start of the 3rd layer** (rewrite the H items in DEBTS.md).
+  First task: promote `OntologyStore` to the enforced full contract (DEBTS §G-Protocol).
+- **0.3.0**: router (dual-write / tenant routing) — only on top of a second backend ([ADR-002](docs/ADR-002-router-deferred.md)).
 
-~~이월된 라이브 스모크~~ **청산 완료.** 실 Fuseki(docker, jena 5.1.0)에서 `pytest -m live` 2/2 PASS:
-- **B4 write 왕복**: insert → ASK True → delete → ASK False ✓
-- **B5 병합 왕복**: 2면 이동(subject+object) 후 구 URI 잔존 **0** ✓
+## Merge gate (live smoke — cleared 2026-08-16)
 
-일회용 데이터셋(`graphstore_smoke`)에서 검증 후 삭제, 실 xgen 데이터셋 무손.
-목-transport + git-앵커드 골든에 더해 실 store e2e 도 통과했다.
+~~Deferred live smoke~~ **cleared.** `pytest -m live` passes 2/2 against a real Fuseki (docker, jena 5.1.0):
+- **B4 write roundtrip**: insert → ASK True → delete → ASK False ✓
+- **B5 merge roundtrip**: after two-sided move (subject + object), old URI residue **0** ✓
 
-**남은 머지 전 결정:** 의존 핀 전환(로컬경로 → git 핀) + 플랫폼 단절 해소 — [DEBTS.md §G](docs/DEBTS.md).
-원격: `github.com/Createyouracccount/xgen-graphstore` (private).
+Verified inside a throwaway dataset (`graphstore_smoke`), then dropped — the live `xgen` dataset was untouched.
+On top of the mock-transport + git-anchored golden tests, the real store e2e now passes too.
+
+**Remaining pre-merge decision:** dependency-pin conversion (local path → git pin) + platform split
+resolution — see [DEBTS.md §G](docs/DEBTS.md). Remote: `github.com/Createyouracccount/xgen-graphstore` (private).

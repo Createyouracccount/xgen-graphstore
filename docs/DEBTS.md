@@ -56,3 +56,14 @@ git/버전 핀으로 전환해야 하며, 그 전에 아래 중 하나를 결정
 - (b) GitLab CI 에 GitHub 자격증명(deploy token 등) 배선 후 git 핀이 GitHub 를 직접 가리킴.
 
 **핀 전환·미러/자격증명 결정 전 develop 머지 금지.** (공개 전환은 별도 인간 승인 사안 — 현재 private.)
+
+## G-Protocol. OntologyStore 인터페이스 승격 (0.2.0 첫 과제)
+현재 `store.py` 의 `OntologyStore` Protocol 은 **핵심 read 5개만 정식 선언**한다
+(`node_properties`·`property_values`·`neighbors`·`triple_exists`·`count_node_triples`).
+나머지 계약(FusekiBackend 자체 의미 메서드 28 + transport 상속 19)은 **구조적(duck-typed)으로만** 만족된다.
+
+- 2층 이관 시점엔 documents 가 `FusekiBackend` 를 직접 참조(타입 힌트로 Protocol 을 안 씀)이라 무해했다.
+- 그러나 **3층(Neo4jBackend) 착수 전엔 Protocol 이 전체 계약을 강제해야 한다** — 그래야 두 번째 백엔드가
+  누락 메서드 없이 컴파일/타입체크 단계에서 걸린다. 이게 이 리포의 존재 이유(백엔드 스왑)의 척추다.
+- 과제: FusekiBackend 표면(계약표)의 시그니처를 Protocol 로 승격. 시그니처는 백엔드에서 정확히 미러링.
+  `sparql_query`/`sparql_update` 같은 raw escape 는 Protocol 에 넣을지(백엔드 중립성 훼손) 별도 판단.
