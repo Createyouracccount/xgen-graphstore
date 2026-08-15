@@ -44,3 +44,15 @@ documents `service/ontology/` 에 도메인 로직으로 잔류. LPG 모델 확�
 
 이유: 각 쿼리가 단일 호출 + OWL-as-data라 메서드로 올리면 (a)단일사용 추상화(문서 CLAUDE.md 위반)
 (b)LPG 미이식 계약 부채. 3층에서 D(OWL-as-data 재모델링)와 함께 일괄 결정.
+
+## G. 의존 핀 전략 — develop 머지 전 필수 결정 (플랫폼 단절)
+이 패키지는 **private GitHub**(`github.com/Createyouracccount/xgen-graphstore`)에 있고,
+documents 는 **GitLab**(`gitlab.x2bee.com/xgen2.0`)에 산다. documents 는 개발 중
+`[tool.uv.sources]` **로컬경로 editable** 로 이 패키지를 참조한다(dev 전용, 그대로 유지).
+
+**GitLab CI 는 private GitHub 리포를 기본으로 끌어오지 못한다.** develop 머지 시점에 로컬경로 →
+git/버전 핀으로 전환해야 하며, 그 전에 아래 중 하나를 결정한다:
+- **(a) GitLab 미러 remote 추가 후 git 핀이 미러를 가리킴 (권고)** — 플랫폼 단절 해소, CI 자격증명 불필요.
+- (b) GitLab CI 에 GitHub 자격증명(deploy token 등) 배선 후 git 핀이 GitHub 를 직접 가리킴.
+
+**핀 전환·미러/자격증명 결정 전 develop 머지 금지.** (공개 전환은 별도 인간 승인 사안 — 현재 private.)

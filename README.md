@@ -82,8 +82,14 @@ pytest -m live          # 실제 Fuseki 필요(FUSEKI_URL). B4/B5 왕복 스모�
 - **0.2.0**: Neo4j 백엔드 = **3층 착수**(DEBTS.md의 H 항목 재작성).
 - **0.3.0**: 라우터(dual-write·테넌트 분기) — 두 번째 백엔드 위에서만([ADR-002](docs/ADR-002-router-deferred.md)).
 
-## ⚠️ 머지 게이트 (이월된 라이브 스모크)
+## 머지 게이트 (라이브 스모크 — 청산됨 2026-08-16)
 
-이 리포와 xgen-documents 는 **Fuseki 환경(docker/CI)에서 `pytest -m live` 통과 전 develop 머지 금지.**
-2층 이관의 B4 write 왕복·B5 병합 왕복(병합 후 구 URI 잔존 0)이 로컬 docker 부재로 이번 세션에
-미검증 이월됨. 목-transport + git-앵커드 골든은 통과했으나 실 store e2e 는 관문으로 남긴다.
+~~이월된 라이브 스모크~~ **청산 완료.** 실 Fuseki(docker, jena 5.1.0)에서 `pytest -m live` 2/2 PASS:
+- **B4 write 왕복**: insert → ASK True → delete → ASK False ✓
+- **B5 병합 왕복**: 2면 이동(subject+object) 후 구 URI 잔존 **0** ✓
+
+일회용 데이터셋(`graphstore_smoke`)에서 검증 후 삭제, 실 xgen 데이터셋 무손.
+목-transport + git-앵커드 골든에 더해 실 store e2e 도 통과했다.
+
+**남은 머지 전 결정:** 의존 핀 전환(로컬경로 → git 핀) + 플랫폼 단절 해소 — [DEBTS.md §G](docs/DEBTS.md).
+원격: `github.com/Createyouracccount/xgen-graphstore` (private).
