@@ -3,6 +3,11 @@
 2층 이관은 동작 보존이 목적이라, Fuseki/RDF/SPARQL 고유 가정이 인터페이스에 일부 남았다.
 Neo4j/AGE 백엔드(0.2.0)를 붙일 때 아래를 해소한다. 출처: documents 이관 원장 §4 + B3/B4/B5.
 
+> **PoC 상태(2026-08-16)**: `neo4j_backend.py` 가 리소스-트리플 핵심 6메서드
+> (insert/delete/triple_exists/count_node_triples/merge_move_subject/merge_move_object)를
+> Cypher 로 구현해 **Fuseki 와 교차 스왑 증명 통과**(`test_cross_backend_swap.py`).
+> 아래 A~F 는 그 PoC 가 `NotImplementedError` 로 남긴 **진짜 3층 재모델링** 대상이다.
+
 ## A. text:query(jena-text/Lucene) 재작성 — 5개 메서드
 Neo4j full-text index(`db.index.fulltext.queryNodes`)로 능력은 포팅되나 **쿼리 전면 재작성** 필요.
 - `seed_relations_by_fulltext_forward` / `..._reverse` — Lucene 임계 **15**

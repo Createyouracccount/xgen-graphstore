@@ -1,10 +1,12 @@
 # xgen-graphstore
 
-Backend-neutral **ontology graph store** — the `OntologyStore` seam plus a Fuseki implementation.
+Backend-neutral **ontology graph store** — the `OntologyStore` seam plus a Fuseki (RDF/SPARQL)
+implementation and a Neo4j (LPG/Cypher) **PoC** implementation.
 A **shared kernel** that XGEN Python services depend on as a library (not an HTTP service — see [ADR-001](docs/ADR-001-shared-kernel.md)).
 
 - Core dependency: `httpx` only. Call instrumentation (call-logging) defaults to an injectable no-op (`set_call_timer`).
 - Goal: make the RDF (Fuseki) ↔ LPG (Neo4j/AGE) store **swappable by replacing the builders/implementation only**.
+- **Proven**: the same contract runs on Fuseki and Neo4j with byte-identical results by changing one config key — see [Swap proof](#swap-proof-2026-08-16).
 
 ## Provenance (history-break compensation)
 
@@ -84,17 +86,39 @@ Connection config comes from env (`FUSEKI_URL`, etc.) or `--base-url/--dataset/-
 
 ```
 pytest -m "not live"    # CI default — sealed golden + mock-transport parse-equivalence (9 tests)
-pytest -m live          # requires a real Fuseki (FUSEKI_URL). B4/B5 roundtrip smoke (2 tests)
+pytest -m live          # requires real servers. Fuseki smoke (FUSEKI_URL) + cross-backend swap
+                        # proof (also needs Neo4j: NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD)
 ```
 
-Verified against Apache Jena Fuseki 5.1.0 (2026-08-16): mock 9/9, live 2/2,
-and the CLI (`health`/`count`/`snapshot-hash`, deterministic hash) end-to-end.
+Verified 2026-08-16 against Fuseki 5.1.0 + Neo4j 5: mock 9/9, Fuseki live 2/2,
+cross-backend swap 2/2, and the CLI (`health`/`count`/`snapshot-hash`, deterministic) end-to-end.
+
+## Swap proof (2026-08-16)
+
+`tests/test_cross_backend_swap.py` runs the **same operations** through `create_store({"backend": X})`
+for `X ∈ {fuseki, neo4j}` and asserts the observable traces are **identical** across the two engines
+(SPARQL triplestore vs Cypher LPG). Verified against Fuseki 5.1.0 + Neo4j 5:
+
+| Roundtrip | Trace (both backends) |
+|---|---|
+| B4 write (`insert → triple_exists → count → delete → triple_exists → count`) | `[True, 1, False, 0]` |
+| B5 merge (2-sided move: `count → merge_move_subject → merge_move_object → count(old) → count(canonical)`) | `[2, 0, 2]` |
+
+The swap point is **one place** — the `create_store` factory. `xgen-documents` calls `create_store()`
+and never names a backend; switching is one env var (`GRAPHSTORE_BACKEND`). This is the concrete
+evidence that the "big work" (Cypher vs SPARQL) lives entirely inside graphstore, not in the callers.
+
+> **PoC scope (honest).** `Neo4jBackend` currently implements the 6 resource-triple core methods
+> (`insert_data`/`delete_data`/`triple_exists`/`count_node_triples`/`merge_move_subject`/`merge_move_object`)
+> + `health_check`. The rest raise `NotImplementedError` pointing at the DEBTS **H** items (text:query
+> full-text, OWL-as-data, named-graph staging, literal properties, TTL) — the genuine 3rd-layer
+> remodeling. Those are all inside this package too.
 
 ## Roadmap
 
-- **0.1.0** (current): factory + Fuseki backend + CLI.
-- **0.2.0**: Neo4j backend = **start of the 3rd layer** (rewrite the H items in DEBTS.md).
-  First task: promote `OntologyStore` to the enforced full contract (DEBTS §G-Protocol).
+- **0.1.0** (current): factory + Fuseki backend + CLI + **Neo4j swap PoC** (6 core methods, cross-backend proof).
+- **0.2.0**: complete the Neo4j backend = **3rd layer** (rewrite the remaining H items in DEBTS.md).
+  Also promote `OntologyStore` to the enforced full contract (DEBTS §G-Protocol).
 - **0.3.0**: router (dual-write / tenant routing) — only on top of a second backend ([ADR-002](docs/ADR-002-router-deferred.md)).
 
 ## Merge gate (live smoke — cleared 2026-08-16)

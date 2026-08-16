@@ -127,5 +127,6 @@ def test_write_methods_emit_sealed_queries():
 
 def test_factory_unknown_backend_raises():
     from xgen_graphstore import create_store, UnknownBackendError
+    # 'fuseki'/'neo4j' 는 이제 지원 — 진짜 미지 백엔드만 명시적 에러(조용한 fallback 금지).
     with pytest.raises(UnknownBackendError):
-        create_store({"backend": "neo4j"})
+        create_store({"backend": "cassandra"})
