@@ -147,7 +147,10 @@ class Neo4jBackend:
         return True
 
     def __getattr__(self, name: str):
-        # 미구현 계약 메서드는 조용한 실패 대신 명시적 NotImplementedError.
+        # dunder/private 접근(introspection·pickle·hasattr·pytest 내부)은 정상 AttributeError.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        # 미구현 '계약' 메서드만 조용한 실패 대신 명시적 NotImplementedError.
         raise NotImplementedError(
             f"Neo4jBackend(PoC)는 '{name}' 미구현 — DEBTS.md 3층 H 항목(LPG 재모델링) 대상. "
             f"현재 PoC 스코프: insert_data/delete_data/triple_exists/count_node_triples/"
