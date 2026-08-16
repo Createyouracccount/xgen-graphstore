@@ -13,7 +13,7 @@ import json
 import sys
 from typing import Any, Dict
 
-from xgen_graphstore.factory import create_store
+from xgen_graphstore.router import create_store
 
 
 def _store(args: argparse.Namespace):

@@ -1,10 +1,12 @@
-"""xgen-graphstore — 백엔드 중립 온톨로지 그래프 저장소.
+"""xgen-graphstore — 백엔드 중립 온톨로지 그래프 저장소 **라우터**.
 
 공개 표면:
 - OntologyStore: 백엔드 중립 의미 인터페이스(Protocol)
-- FusekiBackend: Apache Jena Fuseki 구현 (transport 상속 + 의미 메서드)
-- create_store(config): 백엔드 선택 팩토리
-- GraphStoreError / UnknownBackendError: 예외
+- FusekiBackend: Apache Jena Fuseki(RDF/SPARQL) 구현. Neo4j(LPG) 구현은 create_store 로 선택(optional dep).
+- create_store(config): 라우터의 백엔드 선택 함수 (backend: fuseki|neo4j|등록된 이름)
+- register_backend(name, factory) / available_backends(): 어떤 DB든 등록·조회 (ADR-003 R1)
+- Capability / supports / require_capability: 백엔드 능력 계약 (무증상 오동작 대신 명확 차단)
+- GraphStoreError / UnknownBackendError / CapabilityError: 예외
 - set_call_timer: 선택적 호출 계측 훅 주입
 
 Provenance: xgen-documents service/ontology/{fuseki_client,fuseki_queries,
@@ -15,8 +17,17 @@ from __future__ import annotations
 
 from xgen_graphstore._calltimer import set_call_timer
 from xgen_graphstore.backend import FusekiBackend
-from xgen_graphstore.errors import GraphStoreError, UnknownBackendError
-from xgen_graphstore.factory import create_store
+from xgen_graphstore.capabilities import (
+    Capability,
+    require_capability,
+    supports,
+)
+from xgen_graphstore.errors import (
+    CapabilityError,
+    GraphStoreError,
+    UnknownBackendError,
+)
+from xgen_graphstore.router import available_backends, create_store, register_backend
 from xgen_graphstore.store import OntologyStore
 from xgen_graphstore.transport import FusekiClient
 
@@ -27,8 +38,14 @@ __all__ = [
     "FusekiBackend",
     "FusekiClient",
     "create_store",
+    "register_backend",
+    "available_backends",
+    "Capability",
+    "supports",
+    "require_capability",
     "GraphStoreError",
     "UnknownBackendError",
+    "CapabilityError",
     "set_call_timer",
     "__version__",
 ]

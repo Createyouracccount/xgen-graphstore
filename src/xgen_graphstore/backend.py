@@ -17,11 +17,16 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from xgen_graphstore.transport import FusekiClient
+from xgen_graphstore.capabilities import Capability
 from xgen_graphstore import queries as q
 
 
 class FusekiBackend(FusekiClient):
     """OntologyStore 의 Apache Jena Fuseki 구현."""
+
+    BACKEND_NAME = "fuseki"
+    # RDF/SPARQL 원본 — 모든 능력 보유(2층 이관의 기준 백엔드).
+    CAPABILITIES = frozenset(Capability)
 
     # ── B1: graph_rag 순수 READ ──
 

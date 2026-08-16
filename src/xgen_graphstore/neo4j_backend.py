@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional
+
+from xgen_graphstore.capabilities import Capability, METHOD_CAPABILITY
 
 # `<s> <p> <o> .` (N-Triples, 리소스만) 파서 — FusekiBackend 가 받는 triple_lines 형식과 동일.
 _TRIPLE_RE = re.compile(r"<([^>]+)>\s+<([^>]+)>\s+<([^>]+)>\s*\.")
@@ -39,6 +41,10 @@ def _parse_triples(triple_lines: str) -> List[dict]:
 
 class Neo4jBackend:
     """OntologyStore 계약의 LPG 구현(PoC). FusekiBackend 와 동일 시그니처."""
+
+    BACKEND_NAME = "neo4j"
+    # PoC 스코프 = 리소스-트리플 CRUD 만. fulltext/named-graph/owl/ttl/raw 는 미보유(DEBTS H).
+    CAPABILITIES = frozenset({Capability.CORE_TRIPLE_RW})
 
     def __init__(
         self,
@@ -150,9 +156,18 @@ class Neo4jBackend:
         # dunder/private 접근(introspection·pickle·hasattr·pytest 내부)은 정상 AttributeError.
         if name.startswith("_"):
             raise AttributeError(name)
-        # 미구현 '계약' 메서드만 조용한 실패 대신 명시적 NotImplementedError.
+        from xgen_graphstore.errors import CapabilityError
+
+        # 근본 능력 공백(fulltext/named-graph/owl/ttl/raw)=CapabilityError(라우팅 신호).
+        cap = METHOD_CAPABILITY.get(name)
+        if cap is not None:
+            raise CapabilityError(
+                f"backend 'neo4j' 는 '{cap.value}' 능력 미지원 (메서드 '{name}') — "
+                f"DEBTS.md {cap.value} 항목(3층 LPG 재모델링) 대상."
+            )
+        # 그 외(구현 가능하나 PoC 미완, 예: rename_*)=NotImplementedError.
         raise NotImplementedError(
-            f"Neo4jBackend(PoC)는 '{name}' 미구현 — DEBTS.md 3층 H 항목(LPG 재모델링) 대상. "
-            f"현재 PoC 스코프: insert_data/delete_data/triple_exists/count_node_triples/"
+            f"Neo4jBackend(PoC)는 '{name}' 미구현 — 구현 가능하나 PoC 스코프 밖. "
+            f"현재: insert_data/delete_data/triple_exists/count_node_triples/"
             f"merge_move_subject/merge_move_object/health_check."
         )

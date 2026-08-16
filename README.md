@@ -1,12 +1,37 @@
 # xgen-graphstore
 
-Backend-neutral **ontology graph store** — the `OntologyStore` seam plus a Fuseki (RDF/SPARQL)
-implementation and a Neo4j (LPG/Cypher) **PoC** implementation.
+Backend-neutral **ontology graph-store router** — the `OntologyStore` seam, a pluggable backend
+**registry**, and a **capability contract**, with a Fuseki (RDF/SPARQL) implementation and a
+Neo4j (LPG/Cypher) **PoC** implementation.
 A **shared kernel** that XGEN Python services depend on as a library (not an HTTP service — see [ADR-001](docs/ADR-001-shared-kernel.md)).
 
 - Core dependency: `httpx` only. Call instrumentation (call-logging) defaults to an injectable no-op (`set_call_timer`).
-- Goal: make the RDF (Fuseki) ↔ LPG (Neo4j/AGE) store **swappable by replacing the builders/implementation only**.
+- Goal: **any DB plugs in and XGEN works with no silent breakage** — swap the store by replacing the implementation only.
 - **Proven**: the same contract runs on Fuseki and Neo4j with byte-identical results by changing one config key — see [Swap proof](#swap-proof-2026-08-16).
+- **Router (staged)**: registry + capability contract now (R1); capability-based multi-backend routing next (R2); dual-write/tenant later (R3) — see [ADR-003](docs/ADR-003-router-staged.md).
+
+## Router — register any DB, fail clearly (R1)
+
+```python
+from xgen_graphstore import create_store, register_backend, available_backends
+from xgen_graphstore import Capability, supports, require_capability
+
+register_backend("mydb", lambda cfg: MyBackend(**cfg))   # any DB plugs in — no core edit
+store = create_store({"backend": "mydb"})                # or env GRAPHSTORE_BACKEND; default "fuseki"
+
+supports(store, Capability.FULLTEXT_SEARCH)   # introspect before calling
+require_capability(store, Capability.NAMED_GRAPH)   # -> CapabilityError if unsupported (never silent)
+```
+
+Each backend declares `CAPABILITIES`. Unsupported operations raise `CapabilityError` (naming the
+backend + capability + DEBTS reference) instead of silently misbehaving — aligned with the project's
+"no gray-area defaults" rule. The Neo4j PoC declares only `CORE_TRIPLE_RW`; calling a full-text or
+OWL-schema method on it is a clear `CapabilityError`, not a wrong-but-quiet result.
+
+> **What the router does and does not do.** It selects the right backend and makes capability gaps
+> explicit. It does **not** complete a half-implemented backend — full functionality on a given DB
+> still requires that backend to implement the contract (DEBTS **H** items). "Works with no problems"
+> = clean selection + loud gaps, not "every DB is magically complete."
 
 ## Provenance (history-break compensation)
 
@@ -114,12 +139,13 @@ evidence that the "big work" (Cypher vs SPARQL) lives entirely inside graphstore
 > full-text, OWL-as-data, named-graph staging, literal properties, TTL) — the genuine 3rd-layer
 > remodeling. Those are all inside this package too.
 
-## Roadmap
+## Roadmap (router-staged — [ADR-003](docs/ADR-003-router-staged.md))
 
-- **0.1.0** (current): factory + Fuseki backend + CLI + **Neo4j swap PoC** (6 core methods, cross-backend proof).
-- **0.2.0**: complete the Neo4j backend = **3rd layer** (rewrite the remaining H items in DEBTS.md).
-  Also promote `OntologyStore` to the enforced full contract (DEBTS §G-Protocol).
-- **0.3.0**: router (dual-write / tenant routing) — only on top of a second backend ([ADR-002](docs/ADR-002-router-deferred.md)).
+- **0.1.0** (current): **R1 router** = registry + capability contract + `CapabilityError`; Fuseki backend +
+  CLI + **Neo4j swap PoC** (6 core methods, cross-backend proof).
+- **0.2.0**: **R2** = capability-based multi-backend routing (op → capable backend). Complete the Neo4j
+  backend = **3rd layer** (remaining H items). Promote `OntologyStore` to the enforced full contract (DEBTS §G-Protocol).
+- **0.3.0**: **R3** = router with dual-write / tenant routing — on top of ≥2 backends holding compatible data.
 
 ## Merge gate (live smoke — cleared 2026-08-16)
 
