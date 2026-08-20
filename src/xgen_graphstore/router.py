@@ -64,5 +64,17 @@ def _neo4j_factory(cfg: Dict[str, Any]):
     )
 
 
+def _arcade_factory(cfg: Dict[str, Any]):
+    from xgen_graphstore.arcade_backend import ArcadeBackend
+
+    return ArcadeBackend(
+        base_url=cfg.get("base_url") or cfg.get("uri"),
+        database=cfg.get("database"),
+        username=cfg.get("username"),
+        password=cfg.get("password"),
+    )
+
+
 register_backend("fuseki", _fuseki_factory)
 register_backend("neo4j", _neo4j_factory)
+register_backend("arcade", _arcade_factory)

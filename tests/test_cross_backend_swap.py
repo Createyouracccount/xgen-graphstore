@@ -41,6 +41,17 @@ def _neo4j():
     })
 
 
+def _arcade():
+    from xgen_graphstore import create_store
+    return create_store({
+        "backend": "arcade",
+        "base_url": os.getenv("ARCADE_URL", "http://localhost:2480"),
+        "database": os.getenv("ARCADE_DB", "xgen"),
+        "username": os.getenv("ARCADE_USER", "root"),
+        "password": os.getenv("ARCADE_PASSWORD", "arcadepw"),
+    })
+
+
 def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
@@ -89,3 +100,19 @@ def test_swap_b5_merge_roundtrip_identical():
     neo = _run(_b5_trace(_neo4j(), f"{IN}swap-b5"))
     assert fus == [2, 0, 2], f"fuseki trace off: {fus}"
     assert neo == fus, f"스왑 불일치 neo4j={neo} vs fuseki={fus}"
+
+
+def test_swap_b4_fuseki_vs_arcade_identical():
+    """ArcadeDB(채택 후보) 교차 스왑 — B4 write 왕복이 Fuseki와 동일."""
+    fus = _run(_b4_trace(_fuseki(), f"{IN}swap-arc-b4"))
+    arc = _run(_b4_trace(_arcade(), f"{IN}swap-arc-b4"))
+    assert fus == [True, 1, False, 0], f"fuseki trace off: {fus}"
+    assert arc == fus, f"스왑 불일치 arcade={arc} vs fuseki={fus}"
+
+
+def test_swap_b5_fuseki_vs_arcade_identical():
+    """ArcadeDB 교차 스왑 — B5 병합 왕복(2면 이동 후 구 URI 잔존 0)이 Fuseki와 동일."""
+    fus = _run(_b5_trace(_fuseki(), f"{IN}swap-arc-b5"))
+    arc = _run(_b5_trace(_arcade(), f"{IN}swap-arc-b5"))
+    assert fus == [2, 0, 2], f"fuseki trace off: {fus}"
+    assert arc == fus, f"스왑 불일치 arcade={arc} vs fuseki={fus}"
