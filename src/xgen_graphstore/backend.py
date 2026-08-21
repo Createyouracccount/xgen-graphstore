@@ -25,8 +25,9 @@ class FusekiBackend(FusekiClient):
     """OntologyStore 의 Apache Jena Fuseki 구현."""
 
     BACKEND_NAME = "fuseki"
-    # RDF/SPARQL 원본 — 모든 능력 보유(2층 이관의 기준 백엔드).
-    CAPABILITIES = frozenset(Capability)
+    # RDF/SPARQL 원본 — 2층 이관의 기준 백엔드. 단 반복형 그래프알고리즘(Louvain/PageRank)은
+    # 순수 SPARQL로 in-DB 불가(§11.3 실측: 최단경로조차 불가) → GRAPH_ALGORITHMS 제외(거짓선언 금지).
+    CAPABILITIES = frozenset(Capability) - {Capability.GRAPH_ALGORITHMS}
 
     # ── B1: graph_rag 순수 READ ──
 

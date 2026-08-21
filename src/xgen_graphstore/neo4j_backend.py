@@ -43,8 +43,9 @@ class Neo4jBackend:
     """OntologyStore 계약의 LPG 구현(PoC). FusekiBackend 와 동일 시그니처."""
 
     BACKEND_NAME = "neo4j"
-    # PoC 스코프 = 리소스-트리플 CRUD 만. fulltext/named-graph/owl/ttl/raw 는 미보유(DEBTS H).
-    CAPABILITIES = frozenset({Capability.CORE_TRIPLE_RW})
+    # 리소스-트리플 CRUD + GDS 반복형 그래프알고리즘(커뮤니티탐지/PageRank, §13 실측 채택).
+    # fulltext/named-graph/owl/ttl/raw 는 미보유(DEBTS H).
+    CAPABILITIES = frozenset({Capability.CORE_TRIPLE_RW, Capability.GRAPH_ALGORITHMS})
 
     def __init__(
         self,
@@ -151,6 +152,48 @@ class Neo4jBackend:
             uri=uri, canonical=canonical, g=graph_name,
         )
         return True
+
+    # ── GDS 반복형 그래프알고리즘 (§13 실측 채택 — ArcadeDB 미지원, Neo4j 선택 사유) ──
+    async def _gds_project(self, graph_name: str, proj: str) -> None:
+        """named-graph g 의 REL 을 UNDIRECTED 로 투영. (§13.2: DIRECTED 는 커뮤니티 과분할 함정)"""
+        await self._run(f"CALL gds.graph.drop('{proj}', false) YIELD graphName")
+        await self._run(
+            "MATCH (a:Resource)-[r:REL {g: $g}]->(b:Resource) "
+            f"WITH gds.graph.project('{proj}', a, b, {{}}, {{undirectedRelationshipTypes: ['*']}}) AS gr "
+            "RETURN gr.graphName AS name",
+            g=graph_name,
+        )
+
+    async def community_detect(self, graph_name: str) -> List[dict]:
+        """Louvain 커뮤니티 탐지. 반환: [{uri, community}] — 노드별 커뮤니티 id.
+
+        엔진 in-DB 실행(데이터 미이동). §13.3 실측: 수만 노드 이상서 앱측 pull+계산 대비 우세.
+        """
+        proj = f"cd_{abs(hash(graph_name)) % 10_000_000}"
+        try:
+            await self._gds_project(graph_name, proj)
+            rows = await self._run(
+                f"CALL gds.louvain.stream('{proj}') YIELD nodeId, communityId "
+                "RETURN gds.util.asNode(nodeId).uri AS uri, communityId AS community",
+            )
+            return [{"uri": r["uri"], "community": int(r["community"])} for r in rows]
+        finally:
+            await self._run(f"CALL gds.graph.drop('{proj}', false) YIELD graphName")
+
+    async def pagerank(self, graph_name: str, top: int = 0) -> List[dict]:
+        """PageRank 중심성. 반환: [{uri, score}] score 내림차순. top>0 이면 상위 top 개만."""
+        proj = f"pr_{abs(hash(graph_name)) % 10_000_000}"
+        limit = f" LIMIT {int(top)}" if top and top > 0 else ""
+        try:
+            await self._gds_project(graph_name, proj)
+            rows = await self._run(
+                f"CALL gds.pageRank.stream('{proj}') YIELD nodeId, score "
+                "RETURN gds.util.asNode(nodeId).uri AS uri, score "
+                f"ORDER BY score DESC{limit}",
+            )
+            return [{"uri": r["uri"], "score": float(r["score"])} for r in rows]
+        finally:
+            await self._run(f"CALL gds.graph.drop('{proj}', false) YIELD graphName")
 
     def __getattr__(self, name: str):
         # dunder/private 접근(introspection·pickle·hasattr·pytest 내부)은 정상 AttributeError.

@@ -39,17 +39,40 @@ def test_default_is_fuseki():
     assert type(create_store()).__name__ == "FusekiBackend"
 
 
-def test_capability_introspection_fuseki_all():
+def test_capability_introspection_fuseki_all_except_graph_algos():
+    """Fuseki=RDF/SPARQL 원본이라 대부분 보유하되, 반복형 그래프알고리즘은 in-DB 불가(§11.3)."""
     fus = create_store({"backend": "fuseki"})  # 생성만(연결 없음)
     for cap in Capability:
-        assert supports(fus, cap) is True, cap
+        if cap is Capability.GRAPH_ALGORITHMS:
+            assert supports(fus, cap) is False, "Fuseki는 Louvain/PageRank in-DB 불가"
+        else:
+            assert supports(fus, cap) is True, cap
 
 
-def test_capability_introspection_neo4j_core_only():
+def test_capability_introspection_neo4j_core_and_graph_algos():
+    """Neo4j=코어 트리플 + GDS 그래프알고리즘 보유(§13 채택), fulltext/owl 는 PoC 미보유."""
     neo = create_store({"backend": "neo4j"})   # 드라이버 생성만(연결 없음)
     assert supports(neo, Capability.CORE_TRIPLE_RW) is True
+    assert supports(neo, Capability.GRAPH_ALGORITHMS) is True
     assert supports(neo, Capability.FULLTEXT_SEARCH) is False
     assert supports(neo, Capability.OWL_SCHEMA) is False
+
+
+def test_graph_algorithms_only_neo4j_among_backends():
+    """GRAPH_ALGORITHMS 는 Neo4j만 선언 — 라우터가 알고리즘을 Neo4j로 보낼 근거(§13)."""
+    neo = create_store({"backend": "neo4j"})
+    fus = create_store({"backend": "fuseki"})
+    arc = create_store({"backend": "arcade"})
+    assert supports(neo, Capability.GRAPH_ALGORITHMS) is True
+    assert supports(fus, Capability.GRAPH_ALGORITHMS) is False
+    assert supports(arc, Capability.GRAPH_ALGORITHMS) is False
+
+
+def test_arcade_community_detect_is_capability_error_not_silent():
+    """arcade 에서 community_detect = CapabilityError(회색지대 금지), 조용한 실패 아님."""
+    arc = create_store({"backend": "arcade"})
+    with pytest.raises(CapabilityError):
+        arc.community_detect
 
 
 def test_require_capability_clear_block():

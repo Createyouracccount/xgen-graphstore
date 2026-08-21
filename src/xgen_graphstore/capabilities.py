@@ -17,6 +17,7 @@ class Capability(str, Enum):
     OWL_SCHEMA = "owl_schema"            # OWL/RDFS-as-data 스키마·집계 (DEBTS §D)
     TTL_UPLOAD = "ttl_upload"            # Turtle 업로드 (DEBTS §E)
     RAW_QUERY = "raw_query"              # 백엔드 고유 자유질의(SPARQL 등)
+    GRAPH_ALGORITHMS = "graph_algorithms"  # 반복형 그래프알고리즘(커뮤니티탐지/PageRank) — 엔진 in-DB 실행 (§13 실측)
 
 
 # 특수 능력을 요구하는 메서드만 등록. 미등록 메서드는 CORE(모든 실백엔드 필수)로 간주.
@@ -39,6 +40,8 @@ METHOD_CAPABILITY: dict[str, Capability] = {
     "upload_ttl": Capability.TTL_UPLOAD,
     "sparql_query": Capability.RAW_QUERY,
     "sparql_update": Capability.RAW_QUERY,
+    "community_detect": Capability.GRAPH_ALGORITHMS,
+    "pagerank": Capability.GRAPH_ALGORITHMS,
 }
 
 
