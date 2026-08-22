@@ -15,7 +15,34 @@ Neo4j full-text index(`db.index.fulltext.queryNodes`)로 능력은 포팅되나 
 - `seed_relations_broad` — 임계 **60**
 - `seed_classes_by_fulltext` — 임계 **30**, `GROUP_CONCAT` → Cypher `collect()`
 
-**⚠️ 임계값(15/80/60/30)은 Lucene 점수라 LPG에 등가 개념이 없다 → 재보정 필요.**
+**~~⚠️ 임계값(15/80/60/30)은 Lucene 점수라 LPG에 등가 개념이 없다 → 재보정 필요.~~**
+
+### ⭐ A-정정 (2026-08-23): 위 진단은 틀렸다 — 임계값은 점수가 아니라 개수다
+`(?s ?sc) text:query (rdfs:label "terms" 15)` 의 세 번째 인자는 jena-text 문법상
+**상위 N개 제한(limit)** 이다. Lucene 점수 임계가 아니다.
+→ **"재보정" 이 아니라 "같은 상위 N 개를 뽑으면 된다"** — 등가 이식이 가능하다.
+
+**이식 완료(Neo4j, 2026-08-23)**: `GRAPH_SEARCH` 2/7 → **7/7**
+- `ensure_fulltext_index()` — Lucene full-text index, **analyzer=cjk** 로 Fuseki 의 CJKAnalyzer 와 정렬.
+  `db.awaitIndex` 로 온라인 대기(직후 질의 시 빈 결과가 나는 무증상 위험 차단).
+- `_ft_nodes(terms, N)` — `text:query` 등가. Lucene 특수문자 이스케이프(입력이 질의 문법으로 해석되는 것 차단).
+- 5종: connectivity(양끝 상위80)·broad(단끝 상위60)·forward/reverse(상위15+술어핀)·classes(상위30+owl:Class+집계).
+
+**실측 파리티**(정본 `eval_runs/graphdb_selection/search_port_parity_result.txt`):
+- 시드 선택 자체는 **98~100% 일치** — analyzer 를 맞추면 fulltext 는 사실상 등가.
+- `seed_connectivity_relations` recall **100%**, `broad` **89%**, forward/reverse 비포화 **95~100%**.
+
+**⚠️ 남는 근본 한계 — 동점 절단의 비결정성**: `broad` 의 잔여 차이는 이식 결함이 아니라
+**Lucene 점수 동점** 탓이다. 실측('대학교' 상위60): 점수 2.864 가 **47개 동점**.
+동점자가 자를 자리보다 많으면 "어느 47개를 뽑나" 가 엔진마다 갈린다.
+같은 analyzer·같은 알고리즘을 써도 **tie-break 규칙까지 같을 수는 없다** — 이식으로 못 없앤다.
+완전 결정화하려면 점수 외 2차 정렬키(uri 등)를 양쪽에 강제해야 하는데, 그건 원본 동작을
+바꾸는 것이라 **별도 결정**이 필요하다.
+
+**⚠️ 측정 함정**: LIMIT 절단이 파리티를 망친다. 같은 질의가 LIMIT 100 → recall 13%,
+LIMIT 해제 → **99%**. `ORDER BY` 없는 LIMIT 은 순서를 보장하지 않아 두 엔진이 서로 다른
+100건을 자른다. 파리티 비교는 넉넉한 LIMIT 으로 하고, 하드코딩 LIMIT(forward/reverse 의 40)은
+'포화' 로 표시해 **이식 결함과 절단 인공물을 구분**해야 한다.
 
 ### A-실측 (2026-08-21) — 이건 "부채"가 아니라 **검색 기능의 생사**다
 실데이터 3백엔드 실측 결과(정본 `docs/그래프DB_선정_2026_08_17.md` §15):

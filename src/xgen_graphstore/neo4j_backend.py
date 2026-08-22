@@ -49,13 +49,47 @@ def _parse_triples(triple_lines: str) -> List[dict]:
     return [{"s": s, "p": p, "o": o} for (s, p, o) in parse_triples(triple_lines)]
 
 
+_RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+_OWL_CLASS = "http://www.w3.org/2002/07/owl#Class"
+_RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+_NS_D = "https://w3id.org/xgen-domain#"
+
+# 원본 SPARQL 의 _PRED_FILTER 등가 — 시드 결과에서 제외할 술어(구조·프로비넌스).
+_EXCLUDED_PREDS = [
+    _RDF_TYPE, _RDFS_LABEL,
+    f"{_NS_D}sourceChunk", f"{_NS_D}sourceDocument", f"{_NS_D}scsContextSummary",
+]
+
+# Lucene 질의 특수문자 — 이스케이프하지 않으면 사용자 입력이 질의 문법으로 해석된다.
+_LUCENE_SPECIAL = r'+-&|!(){}[]^"~*?:\/'
+
+
+def _lucene_escape(terms: str) -> str:
+    out = []
+    for ch in terms:
+        if ch in _LUCENE_SPECIAL:
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _parse_pin(pin: str) -> List[str]:
+    """호출부가 조립한 술어라벨 목록(`"a", "b"`) → 파이썬 리스트. 원본 FILTER(STR(?pl) IN (...)) 등가."""
+    return [_unescape(v) for v in re.findall(r'"((?:[^"\\]|\\.)*)"', pin or "")]
+
+
 class Neo4jBackend:
     """OntologyStore 계약의 LPG 구현(PoC). FusekiBackend 와 동일 시그니처."""
 
     BACKEND_NAME = "neo4j"
-    # 리소스-트리플 CRUD + GDS 반복형 그래프알고리즘(커뮤니티탐지/PageRank, §13 실측 채택).
-    # fulltext/named-graph/owl/ttl/raw 는 미보유(DEBTS H).
-    CAPABILITIES = frozenset({Capability.CORE_TRIPLE_RW, Capability.GRAPH_ALGORITHMS})
+    # 리소스-트리플 CRUD + GDS 그래프알고리즘(§13) + fulltext 검색(DEBTS §A, Lucene cjk analyzer).
+    # named-graph/owl-as-data/ttl/raw 는 미보유(DEBTS H).
+    CAPABILITIES = frozenset({
+        Capability.CORE_TRIPLE_RW,
+        Capability.GRAPH_ALGORITHMS,
+        Capability.FULLTEXT_SEARCH,
+    })
 
     def __init__(
         self,
@@ -200,6 +234,133 @@ class Neo4jBackend:
     def _parse_values(values: str) -> List[str]:
         """호출부가 조립한 SPARQL VALUES 리터럴 목록(`"a" "b"`) → 파이썬 리스트."""
         return [_unescape(v) for v in re.findall(r'"((?:[^"\\]|\\.)*)"', values or "")]
+
+    # ── fulltext 검색 (DEBTS §A 4단계) ──
+    #
+    # Fuseki 는 jena-text(Lucene, CJK bigram)로 rdfs:label 을 색인하고
+    #   `(?s ?score) text:query (rdfs:label "terms" N)` 으로 **상위 N개**를 받는다.
+    # ⚠️ N(15/80/60/30)은 Lucene '점수 임계' 가 아니라 **개수 제한**이다 — 등가 이식이 가능하다.
+    # Neo4j 는 같은 Lucene 엔진의 full-text index 를 쓰고 analyzer 를 cjk 로 맞춘다.
+
+    FULLTEXT_INDEX = "xgen_resource_label"
+
+    async def ensure_fulltext_index(self) -> bool:
+        """label 전문검색 인덱스 생성(멱등). analyzer=cjk 로 Fuseki 의 CJKAnalyzer 와 정렬."""
+        await self._run(
+            f"CREATE FULLTEXT INDEX {self.FULLTEXT_INDEX} IF NOT EXISTS "
+            "FOR (n:Resource) ON EACH [n.label] "
+            "OPTIONS {indexConfig: {`fulltext.analyzer`: 'cjk'}}"
+        )
+        # 인덱스가 온라인이 될 때까지 대기 — 직후 질의하면 빈 결과가 나올 수 있다(무증상 위험).
+        await self._run(f"CALL db.awaitIndex('{self.FULLTEXT_INDEX}', 300)")
+        return True
+
+    async def _ft_nodes(self, terms: str, top_n: int) -> List[str]:
+        """text:query 등가 — label 전문검색 상위 N개 노드 uri. Lucene 특수문자는 이스케이프."""
+        if not terms or not terms.strip():
+            return []
+        q = _lucene_escape(terms)
+        rows = await self._run(
+            f"CALL db.index.fulltext.queryNodes('{self.FULLTEXT_INDEX}', $q) "
+            "YIELD node, score RETURN node.uri AS uri ORDER BY score DESC LIMIT $n",
+            q=q, n=int(top_n),
+        )
+        return [r["uri"] for r in rows if r.get("uri")]
+
+    async def seed_relations_by_fulltext_forward(self, graph_name: str, terms: str, pin: str):
+        """정방향 정밀관계: label 검색 상위15 를 주어로, 술어라벨이 pin 목록에 든 관계만.
+
+        원본은 목적어 라벨이 없으면 URI 를 쓴다(COALESCE(STR(?ol2), STR(?o))) — 그대로 재현.
+        """
+        seeds = await self._ft_nodes(terms, 15)
+        pins = _parse_pin(pin)
+        if not seeds or not pins:
+            return self._bindings([])
+        rows = await self._run(
+            "MATCH (s:Resource)-[r:REL {g: $g}]->(o:Resource) "
+            "WHERE s.uri IN $seeds AND s.label IS NOT NULL "
+            "MATCH (p:Resource {uri: r.p}) WHERE p.label IS NOT NULL "
+            "WITH s, o, p WHERE any(x IN p.label WHERE x IN $pins) "
+            "UNWIND s.label AS sl UNWIND p.label AS pl "
+            "WITH sl, pl, o WHERE pl IN $pins "
+            "WITH sl, pl, coalesce(o.label, [o.uri]) AS ols "
+            "UNWIND ols AS ol RETURN DISTINCT sl, pl, ol LIMIT 40",
+            g=graph_name, seeds=seeds, pins=pins,
+        )
+        return self._bindings(rows)
+
+    async def seed_relations_by_fulltext_reverse(self, graph_name: str, terms: str, pin: str):
+        """역방향: label 검색 상위15 를 **목적어**로. 원본은 주어·목적어 라벨 모두 필수."""
+        seeds = await self._ft_nodes(terms, 15)
+        pins = _parse_pin(pin)
+        if not seeds or not pins:
+            return self._bindings([])
+        rows = await self._run(
+            "MATCH (s:Resource)-[r:REL {g: $g}]->(o:Resource) "
+            "WHERE o.uri IN $seeds AND o.label IS NOT NULL AND s.label IS NOT NULL "
+            "MATCH (p:Resource {uri: r.p}) WHERE p.label IS NOT NULL "
+            "UNWIND s.label AS sl UNWIND p.label AS pl UNWIND o.label AS ol "
+            "WITH sl, pl, ol WHERE pl IN $pins "
+            "RETURN DISTINCT sl, pl, ol LIMIT 40",
+            g=graph_name, seeds=seeds, pins=pins,
+        )
+        return self._bindings(rows)
+
+    async def seed_connectivity_relations(self, graph_name: str, terms: str, limit: int):
+        """연결성 시드: **주어·목적어 양끝 모두** label 검색 상위80 에 들어야 한다(가장 좁은 시드)."""
+        seeds = await self._ft_nodes(terms, 80)
+        if not seeds:
+            return self._bindings([])
+        rows = await self._run(
+            "MATCH (s:Resource)-[r:REL {g: $g}]->(o:Resource) "
+            "WHERE s.uri IN $seeds AND o.uri IN $seeds AND s.uri <> o.uri "
+            "  AND s.label IS NOT NULL AND o.label IS NOT NULL "
+            "  AND NOT r.p IN $excl "
+            "OPTIONAL MATCH (p:Resource {uri: r.p}) "
+            "WITH s, o, coalesce(p.label, [null]) AS pls "
+            "UNWIND s.label AS sLabel UNWIND pls AS pLabel UNWIND o.label AS oLabel "
+            "RETURN DISTINCT sLabel, pLabel, oLabel LIMIT $lim",
+            g=graph_name, seeds=seeds, excl=_EXCLUDED_PREDS, lim=int(limit),
+        )
+        return self._bindings(rows)
+
+    async def seed_relations_broad(self, graph_name: str, terms: str, limit: int):
+        """recall 폴백: **주어만** label 검색 상위60 에 들면 된다(연결성 시드가 비었을 때의 유일 경로)."""
+        seeds = await self._ft_nodes(terms, 60)
+        if not seeds:
+            return self._bindings([])
+        rows = await self._run(
+            "MATCH (s:Resource)-[r:REL {g: $g}]->(o:Resource) "
+            "WHERE s.uri IN $seeds AND s.label IS NOT NULL AND o.label IS NOT NULL "
+            "  AND NOT r.p IN $excl "
+            "OPTIONAL MATCH (p:Resource {uri: r.p}) "
+            "WITH s, o, coalesce(p.label, [null]) AS pls "
+            "UNWIND s.label AS sLabel UNWIND pls AS pLabel UNWIND o.label AS oLabel "
+            "RETURN DISTINCT sLabel, pLabel, oLabel LIMIT $lim",
+            g=graph_name, seeds=seeds, excl=_EXCLUDED_PREDS, lim=int(limit),
+        )
+        return self._bindings(rows)
+
+    async def seed_classes_by_fulltext(self, graph_name: str, terms: str):
+        """클래스 전수 시드: label 검색 상위30 중 owl:Class 인 것 + 인스턴스 집계.
+
+        원본 반환: ?cl(클래스라벨) ?n(인스턴스수) ?insts(' | ' 구분 인스턴스라벨), 상위 3개.
+        GROUP_CONCAT → Cypher collect + reduce 로 등가 구현.
+        """
+        seeds = await self._ft_nodes(terms, 30)
+        if not seeds:
+            return self._bindings([])
+        rows = await self._run(
+            "MATCH (c:Resource)-[:REL {p: $type_p}]->(:Resource {uri: $owl_class}) "
+            "WHERE c.uri IN $seeds AND c.label IS NOT NULL "
+            "MATCH (i:Resource)-[:REL {p: $type_p}]->(c) WHERE i.label IS NOT NULL "
+            "WITH c, count(DISTINCT i) AS n, collect(DISTINCT i.label[0]) AS ils "
+            "RETURN c.label[0] AS cl, n, ils ORDER BY n DESC LIMIT 3",
+            seeds=seeds, type_p=_RDF_TYPE, owl_class=_OWL_CLASS,
+        )
+        out = [{"cl": r["cl"], "n": r["n"], "insts": " | ".join(x for x in (r["ils"] or []) if x)}
+               for r in rows]
+        return self._bindings(out)
 
     async def seed_chunk_relations(self, graph_name: str, values: str, limit: int):
         """청크 1홉 관계 시드 (HippoRAG 확장). fulltext 무관 — VALUES 바인딩이라 Cypher 직역 가능.

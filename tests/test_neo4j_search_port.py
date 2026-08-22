@@ -85,3 +85,37 @@ def test_multi_valued_label_not_collapsed():
     assert len(lits) == 2, "다중 label 이 파싱 단계에서 합쳐지면 안 됨"
     assert {l["val"] for l in lits} == {"함께언급", "co-occurs with"}
     assert all(l["key"] == "label" for l in lits)
+
+
+# ── fulltext 이식 (DEBTS §A 4단계) ──
+
+def test_lucene_escape_blocks_query_syntax_injection():
+    """사용자 입력이 Lucene 질의 문법으로 해석되면 안 된다."""
+    from xgen_graphstore.neo4j_backend import _lucene_escape
+    assert _lucene_escape("a+b") == r"a\+b"
+    assert _lucene_escape('label:"x" OR *') == r'label\:\"x\" OR \*'
+    assert _lucene_escape("한국은행") == "한국은행", "한글은 그대로"
+
+
+def test_parse_pin_reads_caller_predicate_list():
+    """술어 핀은 호출부가 '\"a\", \"b\"' 로 조립한다 — 원본 FILTER(STR(?pl) IN (...)) 등가."""
+    from xgen_graphstore.neo4j_backend import _parse_pin
+    assert _parse_pin('"org:alternate_names", "함께언급"') == ["org:alternate_names", "함께언급"]
+    assert _parse_pin("") == []
+
+
+def test_excluded_predicates_match_original_filter():
+    """원본 _PRED_FILTER 와 같은 술어를 제외해야 결과가 어긋나지 않는다."""
+    from xgen_graphstore.neo4j_backend import _EXCLUDED_PREDS
+    tails = {p.rsplit("#", 1)[-1] for p in _EXCLUDED_PREDS}
+    assert tails == {"type", "label", "sourceChunk", "sourceDocument", "scsContextSummary"}
+
+
+def test_fulltext_capability_declared():
+    """fulltext 이식 후 능력 선언이 실제 구현과 일치해야 한다(거짓 선언 금지)."""
+    from xgen_graphstore.capabilities import Capability
+    from xgen_graphstore.neo4j_backend import Neo4jBackend
+    assert Capability.FULLTEXT_SEARCH in Neo4jBackend.CAPABILITIES
+    for m in ("seed_connectivity_relations", "seed_relations_broad", "seed_classes_by_fulltext",
+              "seed_relations_by_fulltext_forward", "seed_relations_by_fulltext_reverse"):
+        assert callable(getattr(Neo4jBackend, m, None)), f"{m} 미구현인데 능력만 선언하면 안 됨"
