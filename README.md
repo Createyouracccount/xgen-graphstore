@@ -33,6 +33,36 @@ OWL-schema method on it is a clear `CapabilityError`, not a wrong-but-quiet resu
 > still requires that backend to implement the contract (DEBTS **H** items). "Works with no problems"
 > = clean selection + loud gaps, not "every DB is magically complete."
 
+## Preflight — block silent degradation at boot
+
+A capability gap only helps if somebody sees it. Callers in `xgen-documents` wrap graph-search calls in
+`except Exception`, so a `CapabilityError` raised at request time is **swallowed**: the answer still comes
+back, but with zero graph evidence — vector search only. Measured on real data: the LPG backends supply
+**0 of the 7** methods the search path calls, entirely silently.
+
+The library cannot stop a caller from swallowing exceptions, so it surfaces the gap **at boot** instead:
+
+```python
+from xgen_graphstore import create_store, Workload, preflight_report, require_workload
+
+store = create_store()                                  # env GRAPHSTORE_BACKEND
+print(preflight_report(store))                          # log which workloads this backend can serve
+require_workload(store, Workload.GRAPH_SEARCH)          # -> CapabilityError if search would be silently empty
+```
+
+`Workload` groups the methods a real task actually calls — `CORE_CRUD`, `GRAPH_SEARCH`, `GRAPH_ALGO` —
+so the check reflects the workload, not one method at a time. Current measured coverage:
+
+| backend | CORE_CRUD | GRAPH_SEARCH | GRAPH_ALGO |
+|---|---|---|---|
+| fuseki | 6/6 | **7/7** | 0/2 |
+| neo4j | 6/6 | 0/7 | **2/2** (GDS) |
+| arcade | 6/6 | 0/7 | 0/2 |
+
+No backend covers everything: Fuseki searches but has no in-DB algorithms; Neo4j runs GDS but cannot
+search yet. Judge search success by `triples_used > 0` / `evidence_nodes > 0` — never by whether an
+answer came back. See `docs/DEBTS.md` §A for the order in which to port search onto an LPG backend.
+
 ## Provenance (history-break compensation)
 
 Extracted from these `xgen-documents` modules:

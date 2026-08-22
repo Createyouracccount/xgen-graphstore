@@ -17,6 +17,27 @@ Neo4j full-text index(`db.index.fulltext.queryNodes`)로 능력은 포팅되나 
 
 **⚠️ 임계값(15/80/60/30)은 Lucene 점수라 LPG에 등가 개념이 없다 → 재보정 필요.**
 
+### A-실측 (2026-08-21) — 이건 "부채"가 아니라 **검색 기능의 생사**다
+실데이터 3백엔드 실측 결과(정본 `docs/그래프DB_선정_2026_08_17.md` §15):
+- 검색 경로(`multi_turn_rag.query`)가 부르는 store 메서드는 **7개**이고, LPG 백엔드는 **0/7** 보유.
+  위 5개(fulltext) + `predicate_labels` + `seed_chunk_relations`(NotImplemented).
+- **호출부가 전부 `except Exception` 으로 흡수** → 예외도 로그도 없이 빈 그래프 근거로 degrade.
+  답변은 정상처럼 보이나 실제론 벡터검색만 동작. **"회색지대 기본값 금지" 정면 위반.**
+- **1차 차단 완료(2026-08-21)**: `capabilities.Workload` + `probe_workload/require_workload/preflight_report`
+  로 **부팅 시점 명시적 차단** 제공. 런타임 흡수는 graphstore가 막을 수 없으므로 부팅에서 드러낸다.
+  → 이제 무증상은 아니다. **단 검색 자체는 여전히 불가** — 아래 순서로 갚아야 산다.
+
+### A-착수 순서 (검색을 LPG에서 살리는 최소 경로)
+1. **`seed_chunk_relations` 먼저** — fulltext 무관(VALUES 바인딩)이라 **순수 Cypher로 바로 이식 가능**.
+   3백엔드 공정 비교의 기준선(control)이자, HippoRAG 1홉 확장의 유일 축. **난이도 최저·가치 즉시.**
+2. **`predicate_labels`** — 순수 SPARQL이라 Cypher 등가 직역 가능. fulltext 게이트의 전제.
+3. **LPG 매핑 승격(선행 권장)** — 현재 `-[:REL {p:"..."}]->` 라 술어가 property.
+   `-[:coOccursWith]->` 로 **관계타입 승격**해야 관계타입 인덱스를 타고, fulltext 이식 성능도 정상화(§15.3).
+4. **fulltext 5종** — Neo4j `db.index.fulltext.queryNodes` (Arcade는 별도 검토).
+   임계값은 이식이 아니라 **재보정**: 동일 질의셋으로 Fuseki 결과와 recall/precision 맞추는 튜닝 필요.
+5. **회귀 게이트**: 이식 후 `require_workload(store, Workload.GRAPH_SEARCH)` 가 통과해야 하고,
+   실질 검증은 `triples_used>0` / `evidence_nodes>0` 로 판정(answer 유무는 신호가 아님).
+
 ## B. named graph 전략
 RDF named graph(`GRAPH <g>` / `WITH <g>`)는 LPG에 없다. collection별 속성 태깅 또는 multi-database.
 - `tag_communities`(DELETE→INSERT), `clear_graph`(CLEAR SILENT), `commit_staged_graph`

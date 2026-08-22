@@ -65,3 +65,104 @@ def require_capability(store, cap: Capability) -> None:
             f"backend '{name}' 는 '{cap.value}' 능력 미지원 — DEBTS.md 참조. "
             f"(무증상 오동작 대신 명확 차단)"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 워크로드 프리플라이트 — 무증상 실패 차단 (§15.4 실측 근거)
+#
+# 배경: 검색 호출부(documents multi_turn_rag)가 `except Exception` 으로 전부 흡수한다.
+# 그래서 능력 미보유 백엔드로 스왑하면 **예외도 로그도 없이** 빈 그래프 근거로 degrade하고,
+# 답변은 정상처럼 보이지만 실제론 벡터검색만 돈다(실측: neo4j/arcade 검색 0/7).
+#
+# 런타임에 삼켜지는 것은 graphstore 가 막을 수 없다 → **부팅 시점에 명시적으로 드러낸다.**
+# 프로젝트 원칙 "회색지대 기본값 금지: 판단 불가는 명시적 통과 또는 명시적 차단".
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Workload(str, Enum):
+    """백엔드가 실제로 수행해야 하는 작업 단위(메서드 묶음)."""
+    CORE_CRUD = "core_crud"          # 트리플 읽기/쓰기/병합 (B4·B5 증명 범위)
+    GRAPH_SEARCH = "graph_search"    # multi_turn_rag.query 검색 경로 전체
+    GRAPH_ALGO = "graph_algo"        # 커뮤니티탐지·PageRank (GDS 등)
+
+
+# 각 워크로드가 실제로 호출하는 메서드 (documents 코드 실사 근거).
+WORKLOAD_METHODS: dict[Workload, tuple[str, ...]] = {
+    Workload.CORE_CRUD: (
+        "insert_data", "delete_data", "triple_exists", "count_node_triples",
+        "merge_move_subject", "merge_move_object",
+    ),
+    # multi_turn_rag.py 가 self.fuseki.* 로 부르는 전부(:209/486/532/533/565/573/587).
+    Workload.GRAPH_SEARCH: (
+        "seed_connectivity_relations",          # 매 질의 1차 시드
+        "seed_classes_by_fulltext",             # 매 질의 클래스 전수
+        "seed_relations_broad",                 # 연결성 빈 결과시 유일 recall
+        "seed_relations_by_fulltext_forward",   # 정방향 정밀관계
+        "seed_relations_by_fulltext_reverse",   # 역방향 정밀관계
+        "predicate_labels",                     # 관계형 게이트
+        "seed_chunk_relations",                 # 1홉 확장(HippoRAG)
+    ),
+    Workload.GRAPH_ALGO: ("community_detect", "pagerank"),
+}
+
+
+def probe_workload(store, workload: Workload) -> dict:
+    """백엔드가 워크로드를 수행 가능한지 **호출 없이** 진단한다.
+
+    반환: {"backend", "workload", "ok", "missing": [(method, reason), ...], "present": [...]}
+    `ok=False` 면 그 워크로드는 이 백엔드에서 성립하지 않는다(조용히 빈 결과가 될 자리).
+    """
+    name = getattr(store, "BACKEND_NAME", type(store).__name__)
+    missing, present = [], []
+    for m in WORKLOAD_METHODS[workload]:
+        try:
+            getattr(store, m)
+            present.append(m)
+        except Exception as e:                      # CapabilityError / NotImplementedError 등
+            missing.append((m, type(e).__name__))
+    return {
+        "backend": name,
+        "workload": workload.value,
+        "ok": not missing,
+        "missing": missing,
+        "present": present,
+    }
+
+
+def require_workload(store, workload: Workload) -> None:
+    """워크로드 수행 불가면 **부팅 시점에** CapabilityError로 차단(무증상 degrade 방지).
+
+    조용한 빈 결과를 원치 않는 경로(예: 그래프 검색이 제품 기능인 배포)에서 부팅 훅으로 호출한다.
+    """
+    r = probe_workload(store, workload)
+    if r["ok"]:
+        return
+    from xgen_graphstore.errors import CapabilityError
+
+    detail = ", ".join(f"{m}({why})" for m, why in r["missing"])
+    raise CapabilityError(
+        f"backend '{r['backend']}' 는 워크로드 '{workload.value}' 수행 불가 — "
+        f"미보유 {len(r['missing'])}/{len(WORKLOAD_METHODS[workload])}: {detail}. "
+        f"이 상태로 기동하면 호출부의 except 흡수로 **무증상 빈 결과**가 된다(§15.4). "
+        f"백엔드를 바꾸거나 해당 메서드를 이식할 것."
+    )
+
+
+def preflight_report(store, workloads=None) -> str:
+    """부팅 로그용 사람이 읽는 진단 리포트. 미보유를 **명시적으로 드러내는 것**이 목적."""
+    workloads = workloads or list(Workload)
+    lines = []
+    for w in workloads:
+        r = probe_workload(store, w)
+        mark = "OK" if r["ok"] else "UNAVAILABLE"
+        lines.append(
+            f"[graphstore preflight] backend={r['backend']} workload={w.value}: {mark} "
+            f"({len(r['present'])}/{len(WORKLOAD_METHODS[w])} 메서드 보유)"
+        )
+        if not r["ok"]:
+            lines.append(
+                "    미보유: " + ", ".join(f"{m}({why})" for m, why in r["missing"])
+            )
+            lines.append(
+                "    ⚠️ 이 워크로드는 조용히 빈 결과가 된다(호출부 except 흡수) — 사용 전 이식 필요."
+            )
+    return "\n".join(lines)

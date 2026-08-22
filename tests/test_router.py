@@ -6,10 +6,14 @@ from xgen_graphstore import (
     Capability,
     CapabilityError,
     UnknownBackendError,
+    Workload,
     available_backends,
     create_store,
+    preflight_report,
+    probe_workload,
     register_backend,
     require_capability,
+    require_workload,
     supports,
 )
 
@@ -94,3 +98,52 @@ def test_neo4j_unbuilt_but_possible_method_is_notimplemented():
     neo = create_store({"backend": "neo4j"})
     with pytest.raises(NotImplementedError):
         neo.rename_move_subject
+
+
+# ── 워크로드 프리플라이트 — 무증상 실패 차단 (§15.4 실측 근거) ──
+
+def test_preflight_detects_search_unavailable_on_lpg():
+    """LPG 백엔드는 검색 워크로드 미보유를 **부팅 시점에** 드러낸다(조용한 빈 결과 방지)."""
+    neo = create_store({"backend": "neo4j"})
+    r = probe_workload(neo, Workload.GRAPH_SEARCH)
+    assert r["ok"] is False
+    assert len(r["missing"]) == 7, "검색 7메서드 전부 미보유여야 함(실측)"
+    assert r["backend"] == "neo4j"
+
+
+def test_preflight_fuseki_search_ok():
+    """Fuseki 는 검색 7/7 보유 — 현재 유일하게 검색되는 백엔드."""
+    fus = create_store({"backend": "fuseki"})
+    r = probe_workload(fus, Workload.GRAPH_SEARCH)
+    assert r["ok"] is True
+    assert r["missing"] == []
+
+
+def test_require_workload_blocks_silent_degrade():
+    """검색 요구 시 LPG 는 CapabilityError 로 **차단**된다 — 무증상 degrade 대신 명시적 실패."""
+    neo = create_store({"backend": "neo4j"})
+    with pytest.raises(CapabilityError) as ei:
+        require_workload(neo, Workload.GRAPH_SEARCH)
+    assert "graph_search" in str(ei.value)
+    # Fuseki 는 통과(예외 없음)
+    require_workload(create_store({"backend": "fuseki"}), Workload.GRAPH_SEARCH)
+
+
+def test_require_workload_algo_split_across_backends():
+    """알고리즘은 Neo4j만, 검색은 Fuseki만 — 어느 백엔드도 전부를 하지 못한다(실측 현실)."""
+    neo = create_store({"backend": "neo4j"})
+    fus = create_store({"backend": "fuseki"})
+    require_workload(neo, Workload.GRAPH_ALGO)          # Neo4j=GDS 보유 → 통과
+    with pytest.raises(CapabilityError):
+        require_workload(fus, Workload.GRAPH_ALGO)      # Fuseki=알고리즘 불가
+    # 코어 CRUD 는 둘 다 통과(B4/B5 증명 범위)
+    require_workload(neo, Workload.CORE_CRUD)
+    require_workload(fus, Workload.CORE_CRUD)
+
+
+def test_preflight_report_names_missing_methods():
+    """리포트가 미보유 메서드를 실제로 열거해야 한다(진단 가치)."""
+    txt = preflight_report(create_store({"backend": "neo4j"}), [Workload.GRAPH_SEARCH])
+    assert "UNAVAILABLE" in txt
+    assert "seed_connectivity_relations" in txt
+    assert "조용히 빈 결과" in txt

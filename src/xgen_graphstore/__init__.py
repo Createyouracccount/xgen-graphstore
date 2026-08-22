@@ -19,7 +19,11 @@ from xgen_graphstore._calltimer import set_call_timer
 from xgen_graphstore.backend import FusekiBackend
 from xgen_graphstore.capabilities import (
     Capability,
+    Workload,
+    preflight_report,
+    probe_workload,
     require_capability,
+    require_workload,
     supports,
 )
 from xgen_graphstore.errors import (
@@ -43,6 +47,10 @@ __all__ = [
     "Capability",
     "supports",
     "require_capability",
+    "Workload",
+    "probe_workload",
+    "require_workload",
+    "preflight_report",
     "GraphStoreError",
     "UnknownBackendError",
     "CapabilityError",
