@@ -28,6 +28,13 @@ from xgen_graphstore.ntriples import (  # noqa: E402
     parse_triples as _parse_triples,
     unescape as _unescape,
 )
+# 검색 의미(제외 술어·핀 파싱·RDF 상수)는 백엔드 공통 — ntriples 가 단일 출처.
+from xgen_graphstore.ntriples import (  # noqa: E402
+    EXCLUDED_PREDS as _EXCLUDED_PREDS,
+    OWL_CLASS as _OWL_CLASS,
+    RDF_TYPE as _RDF_TYPE,
+    parse_pin as _parse_pin,
+)
 
 
 def _q(s: str) -> str:
@@ -39,8 +46,19 @@ class ArcadeBackend:
     """OntologyStore 계약의 ArcadeDB 구현(PoC). HTTP command API(Cypher)."""
 
     BACKEND_NAME = "arcade"
-    # PoC 스코프 = 리소스-트리플 CRUD. fulltext/named-graph/owl/ttl/raw 는 미보유(추후).
-    CAPABILITIES = frozenset({Capability.CORE_TRIPLE_RW})
+    # 리소스-트리플 CRUD + fulltext 검색(DEBTS §A 이식).
+    #
+    # ⚠️⚠️ **한국어 recall 한계(실측)**: ArcadeDB FULL_TEXT 의 CONTAINSTEXT 는 토큰(공백) 기반이라
+    #   Fuseki/Neo4j 의 CJK bigram 과 매칭 특성이 다르다. 시드 선택 실측(Fuseki 기준 recall):
+    #     '한국은행'   fuseki 47건 → neo4j 100% · **arcade 2%**
+    #     '대학교'     fuseki 57건 → neo4j  68% · **arcade 19%**
+    #     'University' fuseki 60건 → neo4j  98% · arcade 98%   ← 영어는 동등
+    #   즉 **영어는 등가, 한국어 부분매칭은 크게 열세**다. 능력은 보유하지만 품질은 동등하지 않다.
+    #   한국어 코퍼스에서 fulltext 가 중요한 배포에는 이 백엔드를 쓰면 안 된다(정본 §15 실측).
+    #   해소하려면 ArcadeDB 측 한국어 분석기(n-gram) 설정이 필요하다 — 별도 과제.
+    #
+    # named-graph/owl-as-data/ttl/raw/그래프알고리즘(OLAP 필요)은 미보유.
+    CAPABILITIES = frozenset({Capability.CORE_TRIPLE_RW, Capability.FULLTEXT_SEARCH})
 
     def __init__(
         self,
@@ -180,6 +198,124 @@ class ArcadeBackend:
             out.append({k: {"type": "literal", "value": str(v)}
                         for k, v in r.items() if v is not None})
         return {"results": {"bindings": out}}
+
+    # ── fulltext 검색 (DEBTS §A) ──
+    #
+    # ⚠️ ArcadeDB 제약(실측): FULL_TEXT 인덱스는 **STRING 프로퍼티에만** 걸린다. 우리는 RDF
+    #    다중값 보존을 위해 label 을 LIST 로 저장하므로 직접 인덱싱이 불가하다.
+    #    → 검색 전용 STRING 필드 `labelText`(label 의 대표값)를 두고 거기에 FULL_TEXT 인덱스.
+    # ⚠️ 또한 ArcadeDB 의 CONTAINSTEXT 는 **토큰(공백) 기반**이라 Fuseki/Neo4j 의 CJK bigram 과
+    #    매칭 특성이 다르다("한국은행"으로 "조흥은행"이 안 걸린다). 한국어 부분매칭 recall 이
+    #    구조적으로 낮다 — 이식으로 없앨 수 없는 엔진 차이이며 실측으로 정량화한다.
+
+    async def ensure_fulltext_index(self) -> bool:
+        """검색용 labelText(STRING) + FULL_TEXT 인덱스 준비(멱등). label 리스트의 대표값을 채운다."""
+        for cmd in (
+            "CREATE PROPERTY Resource.labelText STRING",
+            "CREATE INDEX ON Resource (labelText) FULL_TEXT",
+        ):
+            try:
+                await self._cmd(cmd, language="sql")
+            except Exception:
+                pass  # 이미 존재하면 진행(멱등)
+        # label → labelText 동기화. 리스트 대표값(첫 값)만 색인 대상이 된다.
+        await self._cmd(
+            "UPDATE Resource SET labelText = label[0] WHERE label IS NOT NULL", language="sql")
+        return True
+
+    async def _ft_nodes(self, terms: str, top_n: int) -> List[str]:
+        """text:query 등가 — labelText 전문검색 상위 N개 uri."""
+        if not terms or not terms.strip():
+            return []
+        res = await self._cmd(
+            f"SELECT uri FROM Resource WHERE labelText CONTAINSTEXT '{_q(terms)}' "
+            f"LIMIT {int(top_n)}", language="sql")
+        return [r["uri"] for r in (res or []) if r.get("uri")]
+
+    def _uri_list(self, uris: List[str]) -> str:
+        return ",".join(f'"{_q(u)}"' for u in uris)
+
+    async def _seed_relations(self, graph_name: str, seeds: List[str], limit: int,
+                              both_ends: bool):
+        """connectivity(양끝)/broad(단끝) 공통 본체 — 시드 범위만 다르다."""
+        if not seeds:
+            return self._bindings([])
+        g, slist = _q(graph_name), self._uri_list(seeds)
+        excl = ",".join(f'"{_q(p)}"' for p in _EXCLUDED_PREDS)
+        end_cond = (f"AND o.uri IN [{slist}] AND s.uri <> o.uri " if both_ends else "")
+        head = (
+            f'MATCH (s:Resource)-[r:REL {{g:"{g}"}}]->(o:Resource) '
+            f'WHERE s.uri IN [{slist}] {end_cond}'
+            f'  AND s.label IS NOT NULL AND o.label IS NOT NULL AND NOT r.p IN [{excl}] '
+        )
+        # ArcadeDB 는 관계패턴 뒤 OPTIONAL MATCH 가 r 을 참조하면 조인이 조용히 실패한다.
+        # → label 보유/미보유 두 갈래로 나눠 합친다(seed_chunk_relations 와 동일 우회).
+        with_label = await self._cmd(
+            head + 'WITH s, o, r MATCH (p:Resource {uri:r.p}) WHERE p.label IS NOT NULL '
+            'UNWIND s.label AS sLabel UNWIND p.label AS pLabel UNWIND o.label AS oLabel '
+            f'RETURN DISTINCT sLabel, pLabel, oLabel LIMIT {int(limit)}') or []
+        remaining = int(limit) - len(with_label)
+        no_label = []
+        if remaining > 0:
+            labeled = await self._cmd(
+                f'MATCH ()-[r:REL {{g:"{g}"}}]->() WITH DISTINCT r.p AS p '
+                'MATCH (n:Resource {uri:p}) WHERE n.label IS NOT NULL RETURN p') or []
+            known = {row["p"] for row in labeled if row.get("p")}
+            cond = f'AND NOT r.p IN [{self._uri_list(sorted(known))}] ' if known else ""
+            no_label = await self._cmd(
+                head + cond + 'UNWIND s.label AS sLabel UNWIND o.label AS oLabel '
+                f'RETURN DISTINCT sLabel, oLabel LIMIT {remaining}') or []
+        return self._bindings(with_label + no_label)
+
+    async def seed_connectivity_relations(self, graph_name: str, terms: str, limit: int):
+        """연결성 시드: 주어·목적어 **양끝** 모두 상위80 시드에 들어야 한다."""
+        return await self._seed_relations(
+            graph_name, await self._ft_nodes(terms, 80), limit, both_ends=True)
+
+    async def seed_relations_broad(self, graph_name: str, terms: str, limit: int):
+        """recall 폴백: **주어만** 상위60 시드에 들면 된다."""
+        return await self._seed_relations(
+            graph_name, await self._ft_nodes(terms, 60), limit, both_ends=False)
+
+    async def _seed_pinned(self, graph_name: str, terms: str, pin: str, reverse: bool):
+        """정밀관계(정/역) 공통 — 상위15 시드 + 술어라벨 핀."""
+        seeds = await self._ft_nodes(terms, 15)
+        pins = _parse_pin(pin)
+        if not seeds or not pins:
+            return self._bindings([])
+        g, slist = _q(graph_name), self._uri_list(seeds)
+        plist = ",".join(f'"{_q(p)}"' for p in pins)
+        anchor = "o.uri" if reverse else "s.uri"
+        rows = await self._cmd(
+            f'MATCH (s:Resource)-[r:REL {{g:"{g}"}}]->(o:Resource) '
+            f'WHERE {anchor} IN [{slist}] AND s.label IS NOT NULL AND o.label IS NOT NULL '
+            f'WITH s, o, r MATCH (p:Resource {{uri:r.p}}) WHERE p.label IS NOT NULL '
+            'UNWIND s.label AS sl UNWIND p.label AS pl UNWIND o.label AS ol '
+            f'WITH sl, pl, ol WHERE pl IN [{plist}] '
+            'RETURN DISTINCT sl, pl, ol LIMIT 40') or []
+        return self._bindings(rows)
+
+    async def seed_relations_by_fulltext_forward(self, graph_name: str, terms: str, pin: str):
+        return await self._seed_pinned(graph_name, terms, pin, reverse=False)
+
+    async def seed_relations_by_fulltext_reverse(self, graph_name: str, terms: str, pin: str):
+        return await self._seed_pinned(graph_name, terms, pin, reverse=True)
+
+    async def seed_classes_by_fulltext(self, graph_name: str, terms: str):
+        """클래스 전수 시드: 상위30 시드 중 owl:Class + 인스턴스 집계(상위 3개)."""
+        seeds = await self._ft_nodes(terms, 30)
+        if not seeds:
+            return self._bindings([])
+        slist = self._uri_list(seeds)
+        rows = await self._cmd(
+            f'MATCH (c:Resource)-[:REL {{p:"{_RDF_TYPE}"}}]->(:Resource {{uri:"{_OWL_CLASS}"}}) '
+            f'WHERE c.uri IN [{slist}] AND c.label IS NOT NULL '
+            f'MATCH (i:Resource)-[:REL {{p:"{_RDF_TYPE}"}}]->(c) WHERE i.label IS NOT NULL '
+            'WITH c, count(DISTINCT i) AS n, collect(DISTINCT i.label[0]) AS ils '
+            'RETURN c.label[0] AS cl, n, ils ORDER BY n DESC LIMIT 3') or []
+        out = [{"cl": r.get("cl"), "n": r.get("n"),
+                "insts": " | ".join(x for x in (r.get("ils") or []) if x)} for r in rows]
+        return self._bindings(out)
 
     async def seed_chunk_relations(self, graph_name: str, values: str, limit: int):
         """청크 1홉 관계 시드. label/sourceChunk(리터럴)가 있어야 성립한다."""

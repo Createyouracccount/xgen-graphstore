@@ -49,16 +49,13 @@ def _parse_triples(triple_lines: str) -> List[dict]:
     return [{"s": s, "p": p, "o": o} for (s, p, o) in parse_triples(triple_lines)]
 
 
-_RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
-_OWL_CLASS = "http://www.w3.org/2002/07/owl#Class"
-_RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
-_NS_D = "https://w3id.org/xgen-domain#"
-
-# 원본 SPARQL 의 _PRED_FILTER 등가 — 시드 결과에서 제외할 술어(구조·프로비넌스).
-_EXCLUDED_PREDS = [
-    _RDF_TYPE, _RDFS_LABEL,
-    f"{_NS_D}sourceChunk", f"{_NS_D}sourceDocument", f"{_NS_D}scsContextSummary",
-]
+# RDF 어휘·검색 공통 상수는 ntriples 모듈이 단일 출처(백엔드별로 갈라지면 결과가 어긋난다).
+from xgen_graphstore.ntriples import (  # noqa: E402
+    EXCLUDED_PREDS as _EXCLUDED_PREDS,
+    OWL_CLASS as _OWL_CLASS,
+    RDF_TYPE as _RDF_TYPE,
+    parse_pin as _parse_pin,
+)
 
 # Lucene 질의 특수문자 — 이스케이프하지 않으면 사용자 입력이 질의 문법으로 해석된다.
 _LUCENE_SPECIAL = r'+-&|!(){}[]^"~*?:\/'
@@ -73,10 +70,6 @@ def _lucene_escape(terms: str) -> str:
             out.append(ch)
     return "".join(out)
 
-
-def _parse_pin(pin: str) -> List[str]:
-    """호출부가 조립한 술어라벨 목록(`"a", "b"`) → 파이썬 리스트. 원본 FILTER(STR(?pl) IN (...)) 등가."""
-    return [_unescape(v) for v in re.findall(r'"((?:[^"\\]|\\.)*)"', pin or "")]
 
 
 class Neo4jBackend:

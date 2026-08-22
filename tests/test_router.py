@@ -70,8 +70,8 @@ def test_graph_algorithms_only_neo4j_among_backends():
     assert supports(neo, Capability.GRAPH_ALGORITHMS) is True
     assert supports(fus, Capability.GRAPH_ALGORITHMS) is False
     assert supports(arc, Capability.GRAPH_ALGORITHMS) is False
-    # fulltext 는 fuseki·neo4j 보유, arcade 미보유(이식 대기)
-    assert supports(arc, Capability.FULLTEXT_SEARCH) is False
+    # fulltext 는 3백엔드 모두 이식 완료(DEBTS §A) — 단 매칭 특성은 엔진마다 다르다(실측 공시).
+    assert supports(arc, Capability.FULLTEXT_SEARCH) is True
 
 
 def test_arcade_community_detect_is_capability_error_not_silent():
@@ -90,16 +90,11 @@ def test_require_capability_clear_block():
 
 
 def test_unsupported_method_is_capability_error_not_silent():
-    """미지원 능력 메서드 접근 = CapabilityError(라우팅 신호), 조용한 실패 아님.
-
-    Neo4j 는 fulltext 를 이식했으므로, 아직 미보유인 arcade 로 이 계약을 검증한다.
-    """
-    arc = create_store({"backend": "arcade"})
-    with pytest.raises(CapabilityError):
-        arc.seed_classes_by_fulltext  # __getattr__ → 능력 매핑 → CapabilityError
-    neo = create_store({"backend": "neo4j"})
-    with pytest.raises(CapabilityError):
-        neo.get_tbox_schema           # OWL_SCHEMA 는 여전히 미보유
+    """미지원 능력 메서드 접근 = CapabilityError(라우팅 신호), 조용한 실패 아님."""
+    for backend in ("neo4j", "arcade"):
+        st = create_store({"backend": backend})
+        with pytest.raises(CapabilityError):
+            st.get_tbox_schema        # OWL_SCHEMA 는 두 LPG 백엔드 모두 미보유
 
 
 def test_neo4j_unbuilt_but_possible_method_is_notimplemented():
@@ -111,17 +106,40 @@ def test_neo4j_unbuilt_but_possible_method_is_notimplemented():
 
 # ── 워크로드 프리플라이트 — 무증상 실패 차단 (§15.4 실측 근거) ──
 
-def test_preflight_detects_search_unavailable_on_lpg():
-    """검색 워크로드 **부분 보유**를 부팅 시점에 드러낸다(조용한 빈 결과 방지).
+class _PartialBackend:
+    """검색을 일부만 갖춘 가상 백엔드 — 새 DB 를 꽂았을 때의 상태를 대표한다.
 
-    arcade 는 fulltext 무관분 2종만 이식된 상태 → 워크로드 불가(ok=False)여야 한다.
+    실제 백엔드들이 모두 이식을 마쳐도 이 계약(부분 보유 감지)은 계속 검증돼야 하므로
+    구현체가 아니라 더미로 고정한다.
     """
-    arc = create_store({"backend": "arcade"})
-    r = probe_workload(arc, Workload.GRAPH_SEARCH)
-    assert r["ok"] is False, "fulltext 5종 미이식이라 검색 워크로드는 아직 불가"
-    assert set(r["present"]) == {"seed_chunk_relations", "predicate_labels"}
-    assert len(r["missing"]) == 5, "남은 미보유는 fulltext 5종"
-    assert r["backend"] == "arcade"
+    BACKEND_NAME = "partial"
+    CAPABILITIES = frozenset({Capability.CORE_TRIPLE_RW})
+
+    def seed_chunk_relations(self, *a, **k):
+        raise NotImplementedError
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise CapabilityError(f"partial 백엔드는 '{name}' 미지원")
+
+
+def test_preflight_detects_search_unavailable_on_lpg():
+    """검색 워크로드 **부분 보유**를 부팅 시점에 드러낸다(조용한 빈 결과 방지)."""
+    register_backend("partial", lambda cfg: _PartialBackend())
+    st = create_store({"backend": "partial"})
+    r = probe_workload(st, Workload.GRAPH_SEARCH)
+    assert r["ok"] is False, "검색 미보유 백엔드는 워크로드 불가로 드러나야 함"
+    assert "seed_chunk_relations" in r["present"]
+    assert len(r["missing"]) == 6
+    assert r["backend"] == "partial"
+
+
+def test_preflight_all_real_backends_search_complete():
+    """3백엔드 모두 검색 7/7 이식 완료 — '어떤 DB 를 꽂아도 동일 동작' 의 계약 상태."""
+    for backend in ("fuseki", "neo4j", "arcade"):
+        r = probe_workload(create_store({"backend": backend}), Workload.GRAPH_SEARCH)
+        assert r["ok"] is True, f"{backend} 검색 미보유: {r['missing']}"
 
 
 def test_preflight_neo4j_search_complete_after_port():
@@ -142,13 +160,13 @@ def test_preflight_fuseki_search_ok():
 
 def test_require_workload_blocks_silent_degrade():
     """검색 미보유 백엔드는 CapabilityError 로 **차단** — 무증상 degrade 대신 명시적 실패."""
-    arc = create_store({"backend": "arcade"})
+    register_backend("partial", lambda cfg: _PartialBackend())
     with pytest.raises(CapabilityError) as ei:
-        require_workload(arc, Workload.GRAPH_SEARCH)
+        require_workload(create_store({"backend": "partial"}), Workload.GRAPH_SEARCH)
     assert "graph_search" in str(ei.value)
-    # 검색을 갖춘 백엔드는 통과(예외 없음)
-    require_workload(create_store({"backend": "fuseki"}), Workload.GRAPH_SEARCH)
-    require_workload(create_store({"backend": "neo4j"}), Workload.GRAPH_SEARCH)
+    # 이식을 마친 백엔드는 통과(예외 없음)
+    for backend in ("fuseki", "neo4j", "arcade"):
+        require_workload(create_store({"backend": backend}), Workload.GRAPH_SEARCH)
 
 
 def test_require_workload_algo_split_across_backends():
@@ -165,7 +183,8 @@ def test_require_workload_algo_split_across_backends():
 
 def test_preflight_report_names_missing_methods():
     """리포트가 미보유 메서드를 실제로 열거해야 한다(진단 가치)."""
-    txt = preflight_report(create_store({"backend": "arcade"}), [Workload.GRAPH_SEARCH])
+    register_backend("partial", lambda cfg: _PartialBackend())
+    txt = preflight_report(create_store({"backend": "partial"}), [Workload.GRAPH_SEARCH])
     assert "UNAVAILABLE" in txt
     assert "seed_connectivity_relations" in txt
     assert "조용히 빈 결과" in txt

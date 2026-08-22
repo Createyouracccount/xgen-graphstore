@@ -24,6 +24,25 @@ _LITERAL_RE = re.compile(
 _SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+# ── RDF 어휘 + 검색 공통 상수 (백엔드 무관) ──
+RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+OWL_CLASS = "http://www.w3.org/2002/07/owl#Class"
+NS_DOMAIN = "https://w3id.org/xgen-domain#"
+
+# 원본 SPARQL 의 _PRED_FILTER 등가 — 시드 결과에서 제외할 술어(구조·프로비넌스).
+# 백엔드마다 다르게 두면 같은 질의가 백엔드별로 다른 결과를 내므로 여기 한 곳에서 정의한다.
+EXCLUDED_PREDS = [
+    RDF_TYPE, RDFS_LABEL,
+    f"{NS_DOMAIN}sourceChunk", f"{NS_DOMAIN}sourceDocument", f"{NS_DOMAIN}scsContextSummary",
+]
+
+
+def parse_pin(pin: str) -> List[str]:
+    """호출부가 조립한 술어라벨 목록(`"a", "b"`) → 리스트. 원본 FILTER(STR(?pl) IN (...)) 등가."""
+    return [unescape(v) for v in re.findall(r'"((?:[^"\\]|\\.)*)"', pin or "")]
+
+
 def localname(uri: str) -> str:
     """URI 끝 조각. `...#label` → `label`, `.../sourceChunk` → `sourceChunk`."""
     return uri.rsplit("#", 1)[-1] if "#" in uri else uri.rsplit("/", 1)[-1]
