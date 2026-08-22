@@ -88,6 +88,29 @@ RDF named graph(`GRAPH <g>` / `WITH <g>`)는 LPG에 없다. collection별 속성
   `asyncio.gather(return_exceptions=True)`로 감싼다. 3층에서 "gather를 백엔드 1개 의미연산으로
   합칠지"는 인터페이스 정련 사항 — 지금은 동시성/예외경계를 호출부에 노출(의도).
 
+## E-2. 적재 성능 — 인덱스가 본진, 벌크 도구는 그 다음
+
+**⚠️ 122배 격차의 정체는 '엔진 성능' 이 아니라 '인덱스 부재' 였다.**
+같은 데이터(클래스구조 17,094줄)를 fuseki 5.9s · arcade 4.8s 로 넣는데 Neo4j 는 588.6s 였다.
+인덱스 현황을 보니 ArcadeBackend 는 `_ensure_schema` 에서 `Resource[uri] UNIQUE` 를 만드는데
+**Neo4jBackend 에는 uri 인덱스가 아예 없었다** → `MERGE (n:Resource {uri:...})` 가 매번 풀스캔.
+
+→ **수정(2026-08-23)**: `Neo4jBackend.ensure_schema()` 로 `CREATE CONSTRAINT ... REQUIRE n.uri IS UNIQUE`
+를 보장하고, `insert_data` 첫 호출에서 1회 실행(`_ensure_schema_once`). 실측 A/B 는
+`eval_runs/graphdb_selection/measure_bulk_load.py` / `bulk_load_result.txt`.
+
+**교훈**: 백엔드 간 성능 비교 전에 **각 백엔드가 동등한 인덱스를 갖췄는지 먼저 확인**할 것.
+안 그러면 구현 결함을 엔진 특성으로 오독한다.
+
+### 남은 벌크 경로 (초기 대량 적재용, 미구현)
+| 경로 | 성격 | 제약 |
+|---|---|---|
+| `neo4j-admin database import` | 오프라인 벌크(가장 빠름) | **DB 정지 + CSV 변환 + 기존 데이터 삭제** 필요 → 최초 1회 적재 전용. 증분 불가 |
+| `apoc.periodic.iterate` | 온라인 배치·트랜잭션 분할 | **APOC 플러그인 필요** — 현재 컨테이너에 미설치(프로시저 0개) |
+| 현행 `UNWIND` + 인덱스 | 온라인 증분 | 인덱스만 있으면 실용 범위. **기본 경로로 유지** |
+
+우선순위: 인덱스(완료) → 필요 시 APOC → 초기 마이그레이션에만 neo4j-admin.
+
 ## F. documents-side 잔류 (패키지로 안 옮긴 것) — 3층 처리 대상 10곳
 2층에서 **의도적으로 범위 제외**한 일회용 OWL-as-data. xgen-graphstore로 이관하지 않고
 documents `service/ontology/` 에 도메인 로직으로 잔류. LPG 모델 확정 후 처리.

@@ -104,6 +104,28 @@ class Neo4jBackend:
     async def close(self) -> None:
         await self._driver.close()
 
+    async def ensure_schema(self) -> bool:
+        """uri 유니크 제약(=인덱스) 보장. **적재 성능의 핵심.**
+
+        ⚠️ 이게 없으면 `MERGE (n:Resource {uri: ...})` 가 매번 전체 노드를 훑는다(풀스캔).
+        실측: 인덱스 없이 17,094줄 적재에 588.6초 — 같은 데이터를 ArcadeDB(uri 인덱스 보유)는
+        4.8초에 끝냈다. 122배 격차의 정체가 '엔진 성능' 이 아니라 **인덱스 부재**였다.
+        """
+        await self._run(
+            "CREATE CONSTRAINT xgen_resource_uri IF NOT EXISTS "
+            "FOR (n:Resource) REQUIRE n.uri IS UNIQUE"
+        )
+        return True
+
+    async def _ensure_schema_once(self) -> None:
+        if getattr(self, "_schema_ready", False):
+            return
+        try:
+            await self.ensure_schema()
+        except Exception:
+            pass  # 권한 부족 등 — 적재 자체는 계속(느릴 뿐)
+        self._schema_ready = True
+
     async def _run(self, cypher: str, **params):
         async with self._driver.session(database=self._database) as session:
             result = await session.run(cypher, **params)
@@ -119,6 +141,7 @@ class Neo4jBackend:
 
     # ── B4: WRITE (같은 시그니처: triple_lines 문자열, bool 반환) ──
     async def insert_data(self, graph_name: str, triple_lines: str) -> bool:
+        await self._ensure_schema_once()   # uri 인덱스 — 없으면 MERGE 가 풀스캔(122배 느림)
         rows = _parse_triples(triple_lines)
         if rows:
             await self._run(

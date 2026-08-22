@@ -119,3 +119,20 @@ def test_fulltext_capability_declared():
     for m in ("seed_connectivity_relations", "seed_relations_broad", "seed_classes_by_fulltext",
               "seed_relations_by_fulltext_forward", "seed_relations_by_fulltext_reverse"):
         assert callable(getattr(Neo4jBackend, m, None)), f"{m} 미구현인데 능력만 선언하면 안 됨"
+
+
+def test_ensure_schema_creates_uri_constraint():
+    """uri 유니크 제약(=인덱스) 보장이 계약에 있어야 한다 — 없으면 MERGE 가 풀스캔(122배 느림)."""
+    import inspect
+    from xgen_graphstore.neo4j_backend import Neo4jBackend
+    src = inspect.getsource(Neo4jBackend.ensure_schema)
+    assert "CREATE CONSTRAINT" in src and "IS UNIQUE" in src
+    assert "n.uri" in src, "uri 프로퍼티에 제약이 걸려야 MERGE 가 인덱스를 탄다"
+
+
+def test_insert_data_ensures_schema_first():
+    """적재 경로가 스키마 보장을 호출해야 한다(인덱스 없이 적재되는 것 방지)."""
+    import inspect
+    from xgen_graphstore.neo4j_backend import Neo4jBackend
+    src = inspect.getsource(Neo4jBackend.insert_data)
+    assert "_ensure_schema_once" in src
