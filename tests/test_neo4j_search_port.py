@@ -136,3 +136,43 @@ def test_insert_data_ensures_schema_first():
     from xgen_graphstore.neo4j_backend import Neo4jBackend
     src = inspect.getsource(Neo4jBackend.insert_data)
     assert "_ensure_schema_once" in src
+
+
+# ── 온톨로지 빌드 경로 (kg_builder.build_and_upload) ──
+
+def test_build_workload_methods_exist():
+    """빌드 핵심 경로(ensure_dataset→clear_graph→upload_ttl→정제2종→count)가 구현돼야 한다."""
+    from xgen_graphstore.neo4j_backend import Neo4jBackend
+    for m in ("ensure_dataset", "clear_graph", "upload_ttl",
+              "clean_subclassof_noise", "materialize_property_inheritance",
+              "get_triple_count"):
+        assert callable(getattr(Neo4jBackend, m, None)), f"{m} 미구현 — 빌드가 여기서 죽는다"
+
+
+def test_upload_ttl_requires_rdflib_loudly():
+    """rdflib 부재를 조용히 넘기지 않는다 — 빌드가 무증상으로 비면 안 된다."""
+    import inspect
+    from xgen_graphstore.neo4j_backend import Neo4jBackend
+    src = inspect.getsource(Neo4jBackend.upload_ttl)
+    assert "RuntimeError" in src and "rdflib" in src
+
+
+def test_triple_count_scopes_literals_to_graph():
+    """리터럴 집계가 그래프 범위를 타야 한다.
+
+    회귀: 초기 구현이 전체 노드를 훑어 1,202 트리플이 15,004 로 12배 과다 계상됐다.
+    """
+    import inspect
+    from xgen_graphstore.neo4j_backend import Neo4jBackend
+    src = inspect.getsource(Neo4jBackend.get_triple_count)
+    # graph_name 이 주어진 분기에서 리터럴도 그 그래프의 엣지에 참여한 노드로 좁혀야 한다
+    assert "REL {g: $g}]-() WITH DISTINCT n" in src.replace("\n", " ").replace("  ", " ") \
+        or "-[:REL {g: $g}]-()" in src
+
+
+def test_owl_cleanup_uses_property_type_gate():
+    """subClassOf 정제·상속은 '부모가 속성으로 타입된 경우 제외' 게이트를 지켜야 한다."""
+    import inspect
+    from xgen_graphstore.neo4j_backend import Neo4jBackend
+    for m in (Neo4jBackend.clean_subclassof_noise, Neo4jBackend.materialize_property_inheritance):
+        assert "_PROPERTY_TYPES" in inspect.getsource(m) or "prop_types" in inspect.getsource(m)

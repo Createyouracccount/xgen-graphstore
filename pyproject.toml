@@ -18,6 +18,10 @@ dependencies = [
 dev = ["pytest>=7", "pytest-asyncio>=0.21"]
 # LPG 백엔드(Neo4j) — 코어는 이것 없이 동작. create_store({"backend":"neo4j"}) 때만 필요.
 neo4j = ["neo4j>=5"]
+# LPG 백엔드에서 온톨로지 빌드(upload_ttl)를 쓸 때 필요.
+# kg_builder 가 rdflib 로 serialize(format="turtle") 한 문자열을 넘기므로(kg_builder.py:598/601)
+# LPG 쪽도 같은 파서로 되읽어야 한다. Fuseki 는 서버가 Turtle 을 직접 받으므로 불필요.
+build = ["rdflib>=6"]
 
 [project.scripts]
 graphstore = "xgen_graphstore.cli:main"

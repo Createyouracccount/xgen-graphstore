@@ -83,6 +83,8 @@ class Workload(str, Enum):
     CORE_CRUD = "core_crud"          # 트리플 읽기/쓰기/병합 (B4·B5 증명 범위)
     GRAPH_SEARCH = "graph_search"    # multi_turn_rag.query 검색 경로 전체
     GRAPH_ALGO = "graph_algo"        # 커뮤니티탐지·PageRank (GDS 등)
+    ONTOLOGY_BUILD = "ontology_build"  # 문서→그래프 적재 (kg_builder.build_and_upload)
+    GRAPH_BROWSE = "graph_browse"    # 프론트 그래프 탐색/시각화
 
 
 # 각 워크로드가 실제로 호출하는 메서드 (documents 코드 실사 근거).
@@ -102,6 +104,24 @@ WORKLOAD_METHODS: dict[Workload, tuple[str, ...]] = {
         "seed_chunk_relations",                 # 1홉 확장(HippoRAG)
     ),
     Workload.GRAPH_ALGO: ("community_detect", "pagerank"),
+    # kg_builder.build_and_upload 실제 호출 순서(코드 실사):
+    #   ensure_dataset → clear_graph → upload_ttl → clean_subclassof_noise
+    #   → materialize_property_inheritance, 이후 파이프라인이 get_triple_count 로 검증하고
+    #   중복 병합(merge_*)·rename(rename_*)·ingest 커밋(commit_staged_graph)을 수행한다.
+    # ⚠️ 이 중 하나라도 없으면 빌드는 **그 지점에서 죽는다**(검색과 달리 조용하지 않다).
+    Workload.ONTOLOGY_BUILD: (
+        "ensure_dataset", "clear_graph", "upload_ttl",
+        "clean_subclassof_noise", "materialize_property_inheritance",
+        "get_triple_count", "get_ingest_commit_marker", "commit_staged_graph",
+        "merge_normalized_instances_labels", "merge_move_subject", "merge_move_object",
+        "same_label_nodes",
+        "rename_move_subject", "rename_move_object", "rename_drop_old_label",
+    ),
+    # 프론트 그래프 탐색(graph_rag_operations.py) — 질의 검색이 아니라 브라우징 경로.
+    Workload.GRAPH_BROWSE: (
+        "get_graph_data_for_visualization", "node_properties", "property_values",
+        "neighbors", "community_edges", "community_labels", "tag_communities",
+    ),
 }
 
 

@@ -53,7 +53,10 @@ def _parse_triples(triple_lines: str) -> List[dict]:
 from xgen_graphstore.ntriples import (  # noqa: E402
     EXCLUDED_PREDS as _EXCLUDED_PREDS,
     OWL_CLASS as _OWL_CLASS,
+    PROPERTY_TYPES as _PROPERTY_TYPES,
     RDF_TYPE as _RDF_TYPE,
+    RDFS_DOMAIN as _RDFS_DOMAIN,
+    RDFS_SUBCLASS as _RDFS_SUBCLASS,
     parse_pin as _parse_pin,
 )
 
@@ -78,6 +81,10 @@ class Neo4jBackend:
     BACKEND_NAME = "neo4j"
     # 리소스-트리플 CRUD + GDS 그래프알고리즘(§13) + fulltext 검색(DEBTS §A, Lucene cjk analyzer).
     # named-graph/owl-as-data/ttl/raw 는 미보유(DEBTS H).
+    # OWL_SCHEMA: subClassOf 정제·상속 구체화만 이식(빌드 경로 필수분).
+    # get_tbox_schema / count_classes 등 나머지 OWL-as-data 는 아직 미구현이라
+    # 능력을 선언하면 **거짓 선언**이 된다 → METHOD_CAPABILITY 매핑에서 개별 차단되도록 두고,
+    # 여기서는 선언하지 않는다. (능력 단위가 메서드보다 굵어 생기는 한계 — DEBTS §D)
     CAPABILITIES = frozenset({
         Capability.CORE_TRIPLE_RW,
         Capability.GRAPH_ALGORITHMS,
@@ -223,6 +230,128 @@ class Neo4jBackend:
             "MERGE (a)-[:REL {p: p, g: $g}]->(c) "
             "DELETE r",
             uri=uri, canonical=canonical, g=graph_name,
+        )
+        return True
+
+    # ── 온톨로지 빌드 (kg_builder.build_and_upload 경로) ──
+    #
+    # 실제 적재는 insert_data 가 아니라 **upload_ttl** 이다(kg_builder.py:602/610).
+    # 빌드 호출 순서: ensure_dataset → clear_graph → upload_ttl → (정제 2종)
+    # 이후 파이프라인이 get_triple_count 로 검증한다.
+
+    async def ensure_dataset(self) -> bool:
+        """Fuseki 는 데이터셋을 만들지만 LPG 는 DB 가 이미 있다 — 스키마/인덱스 보장으로 대응."""
+        await self.ensure_schema()
+        return True
+
+    async def clear_graph(self, graph_name: Optional[str] = None) -> bool:
+        """named graph 비우기. RDF `CLEAR SILENT GRAPH` 등가 — 없어도 실패하지 않는다.
+
+        LPG 에는 named graph 가 없으므로 엣지의 g 속성으로 범위를 잡는다.
+        고립된 Resource 노드(엣지가 모두 사라진 것)도 함께 정리해 RDF 의미에 맞춘다.
+        """
+        if graph_name:
+            await self._run("MATCH ()-[r:REL {g: $g}]->() DELETE r", g=graph_name)
+        else:
+            await self._run("MATCH ()-[r:REL]->() DELETE r")
+        # 엣지가 사라져 고아가 된 노드 정리(라벨/청크만 남은 잔재 제거).
+        await self._run(
+            "MATCH (n:Resource) WHERE NOT (n)-[:REL]-() DETACH DELETE n"
+        )
+        return True
+
+    async def upload_ttl(self, ttl_content: str, graph_name: Optional[str] = None):
+        """**빌드의 핵심 적재 경로.** Turtle 문자열을 받아 LPG 로 적재.
+
+        kg_builder 는 rdflib 로 만든 그래프를 `serialize(format="turtle")` 로 넘긴다.
+        여기서는 rdflib 로 파싱해 N-Triples 로 정규화한 뒤 기존 insert_data 경로를 재사용한다
+        (파싱 규칙을 두 벌 두면 같은 입력이 백엔드별로 다른 그래프가 된다).
+
+        반환형은 Fuseki 와 동일하게 dict(성공 여부 포함).
+        """
+        g = graph_name or ""
+        try:
+            from rdflib import Graph as _RDFGraph
+        except ImportError as e:  # 의존성 부재를 조용히 넘기지 않는다
+            raise RuntimeError(
+                "upload_ttl 은 Turtle 파싱에 rdflib 가 필요하다 — `pip install rdflib`"
+            ) from e
+
+        rg = _RDFGraph()
+        rg.parse(data=ttl_content, format="turtle")
+        nt = rg.serialize(format="nt")
+        await self.insert_data(g, nt)
+        return {"success": True, "triples": len(rg), "graph": g}
+
+    async def get_triple_count(self, graph_name: Optional[str] = None) -> int:
+        """트리플 수(엣지 + 해당 그래프 노드의 리터럴 값).
+
+        ⚠️ **구조적 한계**: RDF 는 리터럴 트리플도 named graph 에 속하지만, LPG 에서 리터럴은
+        노드 property 라 **그래프 소속 정보가 없다**. 그래서 리터럴은 "그 그래프의 엣지에
+        참여한 노드" 로 범위를 좁혀 센다 — 여러 그래프가 같은 노드를 공유하면 중복 계상된다.
+        (초기 구현은 범위를 아예 안 잡아 전체 노드를 훑었고 1,202 → 15,004 으로 12배 과다였다.)
+
+        빌드 파이프라인은 이 값을 **적재 검증용 근사치**로 쓴다(pipeline.py 의 reconcile).
+        정확한 RDF 등가가 필요하면 리터럴에도 그래프 태깅이 필요하다 — DEBTS §B(named graph).
+        """
+        if graph_name:
+            rows = await self._run(
+                "MATCH ()-[r:REL {g: $g}]->() RETURN count(r) AS c", g=graph_name)
+            lit_rows = await self._run(
+                "MATCH (n:Resource)-[:REL {g: $g}]-() WITH DISTINCT n "
+                "WITH n, [k IN keys(n) WHERE k <> 'uri'] AS ks "
+                "UNWIND ks AS k WITH n[k] AS v "
+                "RETURN sum(CASE WHEN v IS :: LIST<ANY> THEN size(v) ELSE 1 END) AS c",
+                g=graph_name)
+        else:
+            rows = await self._run("MATCH ()-[r:REL]->() RETURN count(r) AS c")
+            lit_rows = await self._run(
+                "MATCH (n:Resource) WITH n, [k IN keys(n) WHERE k <> 'uri'] AS ks "
+                "UNWIND ks AS k WITH n[k] AS v "
+                "RETURN sum(CASE WHEN v IS :: LIST<ANY> THEN size(v) ELSE 1 END) AS c")
+        edges = int(rows[0]["c"]) if rows else 0
+        lits = int(lit_rows[0]["c"] or 0) if lit_rows and lit_rows[0]["c"] is not None else 0
+        return edges + lits
+
+    async def clean_subclassof_noise(self, graph_name: Optional[str] = None) -> bool:
+        """subClassOf 정제 — 부모가 클래스가 아니라 **속성(관계)** 인 잘못된 is-a 엣지 제거.
+
+        원본 SPARQL: DELETE { ?c rdfs:subClassOf ?p } WHERE { ?c rdfs:subClassOf ?p .
+                     ?p a ?t . FILTER(?t IN (owl:ObjectProperty, owl:DatatypeProperty)) }
+        "이어져있다고 다 상속 아니다" — 추출기가 관계명을 부모로 잘못 박은 노이즈를 차단한다.
+        """
+        gcond = "{g: $g}" if graph_name else ""
+        await self._run(
+            f"MATCH (c:Resource)-[r:REL {{p: $sub{', g: $g' if graph_name else ''}}}]->(p:Resource) "
+            f"MATCH (p)-[:REL {{p: $type}}]->(t:Resource) "
+            "WHERE t.uri IN $prop_types "
+            "DELETE r",
+            sub=_RDFS_SUBCLASS, type=_RDF_TYPE, prop_types=_PROPERTY_TYPES,
+            **({"g": graph_name} if graph_name else {}),
+        )
+        return True
+
+    async def materialize_property_inheritance(self, graph_name: Optional[str] = None) -> bool:
+        """직계(1-level) 상속 구체화 — 부모 클래스의 domain 속성을 자식에게 전파.
+
+        원본과 동일한 **유효 is-a 게이트**: 부모가 진짜 owl:Class 여야 하고,
+        속성으로도 타입된 부모는 제외(관계명이 부모로 잘못 박힌 노이즈 차단).
+        transitive 가 아니라 직계만 — 밀집 계층에서 폭증하기 때문.
+        """
+        gp = {"g": graph_name} if graph_name else {}
+        gc = ", g: $g" if graph_name else ""
+        await self._run(
+            f"MATCH (child:Resource)-[:REL {{p: $sub{gc}}}]->(parent:Resource) "
+            f"MATCH (child)-[:REL {{p: $type{gc}}}]->(:Resource {{uri: $owl_class}}) "
+            f"MATCH (parent)-[:REL {{p: $type{gc}}}]->(:Resource {{uri: $owl_class}}) "
+            f"WHERE NOT EXISTS {{ MATCH (parent)-[:REL {{p: $type{gc}}}]->(pt:Resource) "
+            "  WHERE pt.uri IN $prop_types } "
+            f"MATCH (prop:Resource)-[:REL {{p: $domain{gc}}}]->(parent) "
+            f"MATCH (prop)-[:REL {{p: $type{gc}}}]->(ptt:Resource) WHERE ptt.uri IN $prop_types "
+            f"AND NOT EXISTS {{ MATCH (prop)-[:REL {{p: $domain{gc}}}]->(child) }} "
+            f"MERGE (prop)-[:REL {{p: $domain{gc}}}]->(child)",
+            sub=_RDFS_SUBCLASS, type=_RDF_TYPE, domain=_RDFS_DOMAIN,
+            owl_class=_OWL_CLASS, prop_types=_PROPERTY_TYPES, **gp,
         )
         return True
 

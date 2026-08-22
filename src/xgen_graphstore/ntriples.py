@@ -27,7 +27,13 @@ _SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # ── RDF 어휘 + 검색 공통 상수 (백엔드 무관) ──
 RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
+RDFS_SUBCLASS = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
+RDFS_DOMAIN = "http://www.w3.org/2000/01/rdf-schema#domain"
 OWL_CLASS = "http://www.w3.org/2002/07/owl#Class"
+OWL_OBJECT_PROPERTY = "http://www.w3.org/2002/07/owl#ObjectProperty"
+OWL_DATATYPE_PROPERTY = "http://www.w3.org/2002/07/owl#DatatypeProperty"
+# 원본 SPARQL 의 `FILTER(?t IN (owl:ObjectProperty, owl:DatatypeProperty))` 등가.
+PROPERTY_TYPES = [OWL_OBJECT_PROPERTY, OWL_DATATYPE_PROPERTY]
 NS_DOMAIN = "https://w3id.org/xgen-domain#"
 
 # 원본 SPARQL 의 _PRED_FILTER 등가 — 시드 결과에서 제외할 술어(구조·프로비넌스).
