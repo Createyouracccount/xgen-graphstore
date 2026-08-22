@@ -20,11 +20,14 @@ import httpx
 
 from xgen_graphstore.capabilities import Capability, METHOD_CAPABILITY
 
-_TRIPLE_RE = re.compile(r"<([^>]+)>\s+<([^>]+)>\s+<([^>]+)>\s*\.")
-
-
-def _parse_triples(triple_lines: str):
-    return _TRIPLE_RE.findall(triple_lines)  # [(s,p,o), ...]
+# N-Triples 파싱은 백엔드 공통(ntriples 모듈) — 백엔드마다 다르게 파싱하면 같은 입력이
+# 백엔드별로 다른 그래프가 되어 스왑 계약이 깨진다.
+from xgen_graphstore.ntriples import (  # noqa: E402
+    group_literals_by_key as _group_literals_by_key,
+    parse_literals as _parse_literals,
+    parse_triples as _parse_triples,
+    unescape as _unescape,
+)
 
 
 def _q(s: str) -> str:
@@ -90,18 +93,30 @@ class ArcadeBackend:
         await self._ensure_schema()
         g = _q(graph_name)
         triples = _parse_triples(triple_lines)
-        if not triples:
-            return True
-        # 배치: UNWIND 인라인 리스트로 한 번에(트리플별 왕복 회피).
-        rows = ",".join(
-            f'{{s:"{_q(s)}",o:"{_q(o)}",p:"{_q(p)}"}}' for s, p, o in triples
-        )
-        await self._cmd(
-            f'UNWIND [{rows}] AS row '
-            f'MERGE (a:Resource {{uri:row.s}}) '
-            f'MERGE (b:Resource {{uri:row.o}}) '
-            f'MERGE (a)-[:REL {{p:row.p, g:"{g}"}}]->(b)'
-        )
+        if triples:
+            # 배치: UNWIND 인라인 리스트로 한 번에(트리플별 왕복 회피).
+            rows = ",".join(
+                f'{{s:"{_q(s)}",o:"{_q(o)}",p:"{_q(p)}"}}' for s, p, o in triples
+            )
+            await self._cmd(
+                f'UNWIND [{rows}] AS row '
+                f'MERGE (a:Resource {{uri:row.s}}) '
+                f'MERGE (b:Resource {{uri:row.o}}) '
+                f'MERGE (a)-[:REL {{p:row.p, g:"{g}"}}]->(b)'
+            )
+        # 리터럴 → 노드 property. 이게 없으면 검색이 성립하지 않는다(실측: label 제거 시 314건→0건).
+        # 검색 쿼리 7종이 전부 rdfs:label 을 참조하고, fulltext 5종은 text:query 가 label 자체를
+        # 검색 대상으로 삼는다. 예전엔 리터럴을 **조용히 버려** 입력의 45%가 사라졌다.
+        lits = _parse_literals(triple_lines)
+        for key, batch in _group_literals_by_key(lits).items():
+            rows = ",".join(f'{{s:"{_q(r["s"])}",v:"{_q(r["v"])}"}}' for r in batch)
+            # RDF 다중값 보존: 덮어쓰지 않고 중복 없이 누적(단일값 취급 시 조용한 소실).
+            await self._cmd(
+                f'UNWIND [{rows}] AS row '
+                f'MERGE (n:Resource {{uri:row.s}}) '
+                f'SET n.`{key}` = CASE WHEN n.`{key}` IS NULL THEN [row.v] '
+                f'WHEN row.v IN n.`{key}` THEN n.`{key}` ELSE n.`{key}` + row.v END'
+            )
         return True
 
     async def delete_data(self, graph_name: str, triple_lines: str) -> bool:
@@ -153,6 +168,71 @@ class ArcadeBackend:
             f'DELETE r'
         )
         return True
+
+    # ── 그래프 검색 (DEBTS §A 착수순서 1·2 — fulltext 무관분) ──
+    #
+    # ⚠️ 반환형은 Fuseki 와 동일한 SPARQL JSON bindings 여야 한다(호출부가 그대로 파싱).
+
+    @staticmethod
+    def _bindings(rows: List[dict]) -> dict:
+        out = []
+        for r in rows:
+            out.append({k: {"type": "literal", "value": str(v)}
+                        for k, v in r.items() if v is not None})
+        return {"results": {"bindings": out}}
+
+    async def seed_chunk_relations(self, graph_name: str, values: str, limit: int):
+        """청크 1홉 관계 시드. label/sourceChunk(리터럴)가 있어야 성립한다."""
+        chunks = [_unescape(v) for v in re.findall(r'"((?:[^"\\]|\\.)*)"', values or "")]
+        if not chunks:
+            return self._bindings([])
+        g = _q(graph_name)
+        clist = ",".join(f'"{_q(c)}"' for c in chunks)
+        # ⚠️ ArcadeDB 한계: 관계패턴 뒤의 `OPTIONAL MATCH (p {uri:r.p})` 가 r 을 참조하면
+        #    조인이 조용히 실패해 p.label 이 항상 null 이 된다(실측 확인, 일반 MATCH 는 정상).
+        #    Fuseki 의 OPTIONAL 의미를 보존하려고 두 갈래로 나눠 합친다:
+        #      (1) 술어 label 이 있는 행 — 일반 MATCH 조인
+        #      (2) 술어 label 이 없는 행 — pLabel=null (원본 SPARQL 의 OPTIONAL 미바인딩)
+        head = (
+            f'MATCH (s:Resource)-[r:REL {{g:"{g}"}}]->(o:Resource) '
+            f'WHERE s.sourceChunk IS NOT NULL AND any(c IN s.sourceChunk WHERE c IN [{clist}]) '
+            f'  AND s.label IS NOT NULL AND o.label IS NOT NULL '
+        )
+        with_label = await self._cmd(
+            head + 'WITH s, o, r MATCH (p:Resource {uri:r.p}) WHERE p.label IS NOT NULL '
+            'UNWIND s.label AS sLabel UNWIND p.label AS pLabel UNWIND o.label AS oLabel '
+            f'RETURN DISTINCT sLabel, pLabel, oLabel LIMIT {int(limit)}'
+        ) or []
+        remaining = int(limit) - len(with_label)
+        no_label = []
+        if remaining > 0:
+            # 술어 label 이 없는 행: 술어 URI 를 모아 label 보유 집합과 차집합(순수 Cypher).
+            labeled = await self._cmd(
+                f'MATCH ()-[r:REL {{g:"{g}"}}]->() WITH DISTINCT r.p AS p '
+                'MATCH (n:Resource {uri:p}) WHERE n.label IS NOT NULL RETURN p'
+            ) or []
+            known = {row["p"] for row in labeled if row.get("p")}
+            if known:
+                excl = ",".join(f'"{_q(u)}"' for u in known)
+                cond = f'AND NOT r.p IN [{excl}] '
+            else:
+                cond = ""
+            no_label = await self._cmd(
+                head + f'{cond}'
+                'UNWIND s.label AS sLabel UNWIND o.label AS oLabel '
+                f'RETURN DISTINCT sLabel, oLabel LIMIT {remaining}'
+            ) or []
+        return self._bindings(with_label + no_label)
+
+    async def predicate_labels(self, graph_name: str):
+        """술어 + 라벨. 원본 SPARQL 은 `?p rdfs:label ?pl` 필수 패턴이라 label 없는 술어는 제외."""
+        g = _q(graph_name)
+        res = await self._cmd(
+            f'MATCH ()-[r:REL {{g:"{g}"}}]->() WITH DISTINCT r.p AS p '
+            f'MATCH (n:Resource {{uri:p}}) WHERE n.label IS NOT NULL '
+            f'UNWIND n.label AS pl RETURN DISTINCT p, pl'
+        )
+        return self._bindings(res or [])
 
     # ── ALGORITHM (AGE가 못하던 것 — 네이티브 최단경로) ──
     async def shortest_path(self, from_uri: str, to_uri: str) -> list:

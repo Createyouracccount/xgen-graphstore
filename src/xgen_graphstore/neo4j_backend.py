@@ -28,17 +28,14 @@ from typing import List, Optional
 
 from xgen_graphstore.capabilities import Capability, METHOD_CAPABILITY
 
-# `<s> <p> <o> .` (N-Triples, 리소스만) 파서 — FusekiBackend 가 받는 triple_lines 형식과 동일.
-_TRIPLE_RE = re.compile(r"<([^>]+)>\s+<([^>]+)>\s+<([^>]+)>\s*\.")
-
-# `<s> <p> "literal" .` — 언어태그(@ko)·데이터타입(^^<...>) 허용, 이스케이프(\" \\) 처리.
-# RDF 리터럴은 LPG 에 엣지가 아니라 **노드 property** 로 들어간다(rdfs:label → n.label 등).
-_LITERAL_RE = re.compile(
-    r'<([^>]+)>\s+<([^>]+)>\s+"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?\s*\.'
+# N-Triples 파싱은 백엔드 공통(ntriples 모듈) — 백엔드마다 다르게 파싱하면 같은 입력이
+# 백엔드별로 다른 그래프가 되어 스왑 계약이 깨진다. 아래는 기존 이름 유지를 위한 얇은 별칭.
+from xgen_graphstore.ntriples import (  # noqa: E402
+    group_literals_by_key as _group_literals_by_key,
+    localname as _localname,
+    parse_literals as _parse_literals,
+    unescape as _unescape,
 )
-
-# property 키로 쓸 수 있는 안전한 이름(URI localname). Cypher 백틱 이스케이프와 조합해 주입 차단.
-_SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # ⚠️ 단일값 특례를 두지 않는다. RDF 는 같은 술어에 값이 여럿일 수 있고(실데이터에서
 # coOccursWith 의 rdfs:label 이 "함께언급"·"co-occurs with" 둘 다 존재), 단일값으로 다루면
@@ -47,31 +44,9 @@ _SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _parse_triples(triple_lines: str) -> List[dict]:
-    return [
-        {"s": s, "p": p, "o": o}
-        for (s, p, o) in _TRIPLE_RE.findall(triple_lines)
-    ]
+    from xgen_graphstore.ntriples import parse_triples
 
-
-def _localname(uri: str) -> str:
-    """URI 끝 조각을 property 키로. `...#label` → `label`, `.../sourceChunk` → `sourceChunk`."""
-    tail = uri.rsplit("#", 1)[-1] if "#" in uri else uri.rsplit("/", 1)[-1]
-    return tail
-
-
-def _unescape(v: str) -> str:
-    return v.replace('\\"', '"').replace("\\\\", "\\").replace("\\n", "\n").replace("\\t", "\t")
-
-
-def _parse_literals(triple_lines: str) -> List[dict]:
-    """리터럴 트리플 → {s, key, val}. 키로 부적합한 술어는 건너뛴다(조용한 오저장 방지)."""
-    out = []
-    for (s, p, v) in _LITERAL_RE.findall(triple_lines):
-        key = _localname(p)
-        if not _SAFE_KEY_RE.match(key):
-            continue
-        out.append({"s": s, "key": key, "val": _unescape(v)})
-    return out
+    return [{"s": s, "p": p, "o": o} for (s, p, o) in parse_triples(triple_lines)]
 
 
 class Neo4jBackend:
@@ -130,10 +105,7 @@ class Neo4jBackend:
         # 동적 키는 Cypher 파라미터로 못 주므로 키별로 배치를 나눠 실행(키는 _SAFE_KEY_RE 로 통제).
         lits = _parse_literals(triple_lines)
         if lits:
-            by_key: dict = {}
-            for r in lits:
-                by_key.setdefault(r["key"], []).append({"s": r["s"], "v": r["val"]})
-            for key, batch in by_key.items():
+            for key, batch in _group_literals_by_key(lits).items():
                 # 모든 리터럴을 중복 없이 리스트로 누적(RDF 다중값 보존 — 덮어쓰기 금지).
                 setter = (
                     f"SET n.`{key}` = CASE WHEN n.`{key}` IS NULL THEN [r.v] "
