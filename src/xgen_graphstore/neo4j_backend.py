@@ -31,12 +31,47 @@ from xgen_graphstore.capabilities import Capability, METHOD_CAPABILITY
 # `<s> <p> <o> .` (N-Triples, 리소스만) 파서 — FusekiBackend 가 받는 triple_lines 형식과 동일.
 _TRIPLE_RE = re.compile(r"<([^>]+)>\s+<([^>]+)>\s+<([^>]+)>\s*\.")
 
+# `<s> <p> "literal" .` — 언어태그(@ko)·데이터타입(^^<...>) 허용, 이스케이프(\" \\) 처리.
+# RDF 리터럴은 LPG 에 엣지가 아니라 **노드 property** 로 들어간다(rdfs:label → n.label 등).
+_LITERAL_RE = re.compile(
+    r'<([^>]+)>\s+<([^>]+)>\s+"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?\s*\.'
+)
+
+# property 키로 쓸 수 있는 안전한 이름(URI localname). Cypher 백틱 이스케이프와 조합해 주입 차단.
+_SAFE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# ⚠️ 단일값 특례를 두지 않는다. RDF 는 같은 술어에 값이 여럿일 수 있고(실데이터에서
+# coOccursWith 의 rdfs:label 이 "함께언급"·"co-occurs with" 둘 다 존재), 단일값으로 다루면
+# 나중 값이 앞 값을 **조용히 덮어써** 검색 결과가 소리 없이 누락된다(실측서 149건 소실).
+# 전부 리스트로 누적하고, 읽는 쪽이 SPARQL 처럼 값마다 행을 펼친다.
+
 
 def _parse_triples(triple_lines: str) -> List[dict]:
     return [
         {"s": s, "p": p, "o": o}
         for (s, p, o) in _TRIPLE_RE.findall(triple_lines)
     ]
+
+
+def _localname(uri: str) -> str:
+    """URI 끝 조각을 property 키로. `...#label` → `label`, `.../sourceChunk` → `sourceChunk`."""
+    tail = uri.rsplit("#", 1)[-1] if "#" in uri else uri.rsplit("/", 1)[-1]
+    return tail
+
+
+def _unescape(v: str) -> str:
+    return v.replace('\\"', '"').replace("\\\\", "\\").replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _parse_literals(triple_lines: str) -> List[dict]:
+    """리터럴 트리플 → {s, key, val}. 키로 부적합한 술어는 건너뛴다(조용한 오저장 방지)."""
+    out = []
+    for (s, p, v) in _LITERAL_RE.findall(triple_lines):
+        key = _localname(p)
+        if not _SAFE_KEY_RE.match(key):
+            continue
+        out.append({"s": s, "key": key, "val": _unescape(v)})
+    return out
 
 
 class Neo4jBackend:
@@ -83,15 +118,31 @@ class Neo4jBackend:
     # ── B4: WRITE (같은 시그니처: triple_lines 문자열, bool 반환) ──
     async def insert_data(self, graph_name: str, triple_lines: str) -> bool:
         rows = _parse_triples(triple_lines)
-        if not rows:
-            return True
-        await self._run(
-            "UNWIND $rows AS row "
-            "MERGE (a:Resource {uri: row.s}) "
-            "MERGE (b:Resource {uri: row.o}) "
-            "MERGE (a)-[:REL {p: row.p, g: $g}]->(b)",
-            rows=rows, g=graph_name,
-        )
+        if rows:
+            await self._run(
+                "UNWIND $rows AS row "
+                "MERGE (a:Resource {uri: row.s}) "
+                "MERGE (b:Resource {uri: row.o}) "
+                "MERGE (a)-[:REL {p: row.p, g: $g}]->(b)",
+                rows=rows, g=graph_name,
+            )
+        # 리터럴은 엣지가 아니라 노드 property (rdfs:label → n.label, sourceChunk → n.sourceChunk[]).
+        # 동적 키는 Cypher 파라미터로 못 주므로 키별로 배치를 나눠 실행(키는 _SAFE_KEY_RE 로 통제).
+        lits = _parse_literals(triple_lines)
+        if lits:
+            by_key: dict = {}
+            for r in lits:
+                by_key.setdefault(r["key"], []).append({"s": r["s"], "v": r["val"]})
+            for key, batch in by_key.items():
+                # 모든 리터럴을 중복 없이 리스트로 누적(RDF 다중값 보존 — 덮어쓰기 금지).
+                setter = (
+                    f"SET n.`{key}` = CASE WHEN n.`{key}` IS NULL THEN [r.v] "
+                    f"WHEN r.v IN n.`{key}` THEN n.`{key}` ELSE n.`{key}` + r.v END"
+                )
+                await self._run(
+                    f"UNWIND $rows AS r MERGE (n:Resource {{uri: r.s}}) {setter}",
+                    rows=batch,
+                )
         return True
 
     async def delete_data(self, graph_name: str, triple_lines: str) -> bool:
@@ -152,6 +203,77 @@ class Neo4jBackend:
             uri=uri, canonical=canonical, g=graph_name,
         )
         return True
+
+    # ── 그래프 검색 (DEBTS §A 착수순서 1·2 — fulltext 무관 부분부터) ──
+    #
+    # ⚠️ 반환형은 **Fuseki 와 동일한 SPARQL JSON bindings** 여야 한다.
+    # 호출부(documents multi_turn_rag)가 res["results"]["bindings"] 를 직접 파싱하고
+    # 변수명(sLabel/pLabel/oLabel, p/pl)까지 그대로 읽기 때문. 여기서 형태가 어긋나면
+    # 또 조용한 빈 결과가 된다(§15.4 무증상 실패와 같은 계통).
+
+    @staticmethod
+    def _bindings(rows: List[dict]) -> dict:
+        """Cypher 결과 → SPARQL JSON 형태. None 값 키는 생략(SPARQL OPTIONAL 미바인딩 등가)."""
+        out = []
+        for r in rows:
+            b = {}
+            for k, v in r.items():
+                if v is None:
+                    continue
+                b[k] = {"type": "literal", "value": str(v)}
+            out.append(b)
+        return {"results": {"bindings": out}}
+
+    @staticmethod
+    def _parse_values(values: str) -> List[str]:
+        """호출부가 조립한 SPARQL VALUES 리터럴 목록(`"a" "b"`) → 파이썬 리스트."""
+        return [_unescape(v) for v in re.findall(r'"((?:[^"\\]|\\.)*)"', values or "")]
+
+    async def seed_chunk_relations(self, graph_name: str, values: str, limit: int):
+        """청크 1홉 관계 시드 (HippoRAG 확장). fulltext 무관 — VALUES 바인딩이라 Cypher 직역 가능.
+
+        원본 SPARQL: ?s :sourceChunk ?c(VALUES) . ?s rdfs:label ?sLabel . ?s ?p ?o .
+                     FILTER(?p 가 type/label/sourceChunk/sourceDocument/scsContextSummary 아님)
+                     ?o rdfs:label ?oLabel . OPTIONAL { ?p rdfs:label ?pLabel }
+        LPG: sourceChunk 는 노드 property(리스트), 관계는 REL 엣지, 술어라벨은 localname.
+        """
+        chunks = self._parse_values(values)
+        if not chunks:
+            return self._bindings([])
+        # 술어 라벨은 술어 URI 자신의 rdfs:label 트리플에서 온다(원본 SPARQL 의 OPTIONAL).
+        # 실데이터에서 label 값은 localname 과 다르다(예: org_alternate_names → "org:alternate_names",
+        # coOccursWith → "co-occurs with"). localname 으로 대체하면 조용히 다른 값이 나간다.
+        # 술어 URI 도 Resource 노드로 적재되므로 그 노드의 label 을 조인해 읽는다.
+        # label 은 리스트(RDF 다중값). SPARQL 은 값마다 해(solution)를 내므로 UNWIND 로 펼친다.
+        # pLabel 은 OPTIONAL — 없으면 null 한 행(원본 SPARQL 의 OPTIONAL 미바인딩과 등가).
+        rows = await self._run(
+            "MATCH (s:Resource)-[r:REL {g: $g}]->(o:Resource) "
+            "WHERE s.sourceChunk IS NOT NULL AND any(c IN s.sourceChunk WHERE c IN $chunks) "
+            "  AND s.label IS NOT NULL AND o.label IS NOT NULL "
+            "OPTIONAL MATCH (p:Resource {uri: r.p}) "
+            "WITH s, o, coalesce(p.label, [null]) AS pls "
+            "UNWIND s.label AS sLabel UNWIND pls AS pLabel UNWIND o.label AS oLabel "
+            "RETURN DISTINCT sLabel, pLabel, oLabel "
+            "LIMIT $limit",
+            g=graph_name, chunks=chunks, limit=int(limit),
+        )
+        return self._bindings(rows)
+
+    async def predicate_labels(self, graph_name: str):
+        """그래프에서 실제 쓰인 술어 + 라벨. 순수 SPARQL 이라 Cypher 직역 가능(fulltext 무관).
+
+        원본 반환 변수: ?p (술어 URI) / ?pl (술어 라벨).
+        """
+        # pl 은 술어 URI 자신의 rdfs:label(= Resource 노드의 label property). localname 이 아니다.
+        # ⚠️ 원본 SPARQL 은 `?s ?p ?o . ?p rdfs:label ?pl` — **필수 패턴**이라 label 없는 술어는
+        # 결과에서 아예 빠진다(OPTIONAL 아님). 여기서 OPTIONAL 로 풀면 null 행이 섞여 계약이 어긋난다.
+        rows = await self._run(
+            "MATCH ()-[r:REL {g: $g}]->() WITH DISTINCT r.p AS p "
+            "MATCH (n:Resource {uri: p}) WHERE n.label IS NOT NULL "
+            "UNWIND n.label AS pl RETURN DISTINCT p, pl",
+            g=graph_name,
+        )
+        return self._bindings(rows)
 
     # ── GDS 반복형 그래프알고리즘 (§13 실측 채택 — ArcadeDB 미지원, Neo4j 선택 사유) ──
     async def _gds_project(self, graph_name: str, proj: str) -> None:

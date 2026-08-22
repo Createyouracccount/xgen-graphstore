@@ -103,11 +103,18 @@ def test_neo4j_unbuilt_but_possible_method_is_notimplemented():
 # ── 워크로드 프리플라이트 — 무증상 실패 차단 (§15.4 실측 근거) ──
 
 def test_preflight_detects_search_unavailable_on_lpg():
-    """LPG 백엔드는 검색 워크로드 미보유를 **부팅 시점에** 드러낸다(조용한 빈 결과 방지)."""
+    """LPG 백엔드는 검색 워크로드 **부분 보유**를 부팅 시점에 드러낸다(조용한 빈 결과 방지).
+
+    DEBTS §A 착수순서대로 fulltext 무관분(seed_chunk_relations·predicate_labels)을 먼저 이식했다.
+    나머지 fulltext 5종은 아직 미보유 → 워크로드는 여전히 불가(ok=False)여야 한다.
+    """
     neo = create_store({"backend": "neo4j"})
     r = probe_workload(neo, Workload.GRAPH_SEARCH)
-    assert r["ok"] is False
-    assert len(r["missing"]) == 7, "검색 7메서드 전부 미보유여야 함(실측)"
+    assert r["ok"] is False, "fulltext 5종 미이식이라 검색 워크로드는 아직 불가"
+    assert set(r["present"]) == {"seed_chunk_relations", "predicate_labels"}, \
+        "fulltext 무관분 2종은 이식 완료여야 함"
+    assert len(r["missing"]) == 5, "남은 미보유는 fulltext 5종"
+    assert all("fulltext" in m or m.startswith("seed_") for m, _ in r["missing"])
     assert r["backend"] == "neo4j"
 
 
