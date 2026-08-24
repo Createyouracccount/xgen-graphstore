@@ -164,10 +164,24 @@ class FusekiClient:
                 if resp.status_code == 200:
                     data = resp.json()
                     bindings = data.get("results", {}).get("bindings", []) if isinstance(data, dict) else []
+                    # 관측 로그에는 대형 결과를 통째로 싣지 않는다 — 40.8만 행 응답이
+                    # ONT-CALL 로 그대로 덤프되어 로그가 라인당 수십 MB(도커 로그 179MB)로
+                    # 부풀고, 직렬화 자체가 finalize 메모리 압박에 가담했다(0714 실측).
+                    # rows(총 행수) + 표본 몇 행이면 디버깅 관측성은 유지된다.
+                    # 반환값(data)은 손대지 않는다 — 호출자는 전체를 받는다.
+                    _LOG_BINDINGS_CAP = 50
+                    if len(bindings) > _LOG_BINDINGS_CAP:
+                        log_data = {
+                            "head": data.get("head"),
+                            "results": {"bindings": bindings[:_LOG_BINDINGS_CAP]},
+                            "truncated_for_log": f"{len(bindings)} rows → {_LOG_BINDINGS_CAP} 표본",
+                        }
+                    else:
+                        log_data = data
                     t.set_result({
                         "status_code": 200,
                         "rows": len(bindings),
-                        "data": data,
+                        "data": log_data,
                     })
                     return data
                 else:
@@ -205,6 +219,83 @@ class FusekiClient:
                 t.set_result({"exception": str(e)})
                 t.status = "error"
                 return False
+
+    # ── ontology-search 계보 수리 이관 (2026-08-24) ─────────────────────────
+    # 출처: xgen-documents service/ontology/fuseki_client.py @ontology-search.
+    # 74a322a 추출 시점의 원본은 이 3개가 없던 판본이라 누락됐다. pipeline.py 가
+    # sparql_query_csv 를 10곳, compact_dataset/has_active_compact 를 빌드 루프에서
+    # 호출하므로, 없으면 FusekiBackend 스왑 시 AttributeError 로 죽는다.
+    async def compact_dataset(self, timeout_sec: float = 600.0) -> bool:
+        """TDB2 스토어 압축(라이브 compact) — 죽은 블록 회수.
+
+        왜 필요한가: TDB2 는 copy-on-write append-only 라 쓰기 트랜잭션마다
+        수정된 B+트리 경로 전체가 파일 끝에 복사되고 옛 페이지는 죽은 채 남는다
+        (compact 전까지 절대 회수 안 됨). 그룹 단위 누적 빌드(201 그룹 × 그룹당
+        1+ 트랜잭션)에서는 트리가 커질수록 트랜잭션당 복사량도 커져서 팽창이
+        가속된다 — 실측: 실데이터 1.4GB 그래프가 한 번의 전체 빌드로 121GB 까지
+        부풀어 디스크 풀로 빌드가 죽었다(2026-07-15). 빌드 중 주기 호출로 스토어를
+        작게 유지하면 트랜잭션당 비용도 작게 유지돼 팽창이 선형 이하로 억제된다.
+
+        deleteOld=true: 압축 완료 즉시 구세대(Data-000N) 삭제 — 이게 없으면
+        구세대가 남아 디스크는 그대로다. 완료까지 폴링해 동기적으로 기다린다
+        (다음 그룹의 쓰기가 compact 와 경합하지 않도록).
+        """
+        try:
+            resp = await self._client.post(
+                f"{self.base_url}/$/compact/{self.dataset}",
+                params={"deleteOld": "true"},
+                auth=self._auth,
+            )
+            if resp.status_code not in (200, 201):
+                return False
+            task_id = (resp.json() or {}).get("taskId")
+            if not task_id:
+                return False
+            waited = 0.0
+            poll = 2.0
+            while waited < timeout_sec:
+                await asyncio.sleep(poll)
+                waited += poll
+                st = await self._read_client.get(
+                    f"{self.base_url}/$/tasks/{task_id}", auth=self._auth
+                )
+                if st.status_code == 200 and (st.json() or {}).get("finished"):
+                    return bool((st.json() or {}).get("success", True))
+            return False  # 타임아웃 — compact 는 서버에서 계속 돌 수 있음(best-effort)
+        except Exception:
+            return False
+
+    async def has_active_compact(self) -> bool:
+        """서버에 진행 중 Compact 태스크가 있는지 — 0814 사고: 타임아웃으로 False
+        반환 후에도 서버는 compact 를 계속 돌리며 쓰기 락을 쥔다. 이 상태에서
+        대량쓰기를 얹으면 전부 무증상 타임아웃(사이드카 60s 전멸 실측). 후속
+        쓰기 단계는 이 메서드로 배타성을 확인해야 한다."""
+        try:
+            st = await self._read_client.get(f"{self.base_url}/$/tasks", auth=self._auth)
+            if st.status_code != 200:
+                return False
+            return any(t.get("task") == "Compact" and not t.get("finished")
+                       for t in (st.json() or []))
+        except Exception:
+            return False
+
+    async def sparql_query_csv(self, query: str, timeout: Optional[float] = None) -> str:
+        """SPARQL SELECT 를 CSV 텍스트로 — 대용량 결과 전용.
+
+        JSON bindings 는 행당 dict 오버헤드가 커서 수십만 행(클래스 필터의 44만
+        클래스 통계)에서 GB 급 메모리 → 컨테이너 OOM kill 실측. CSV 는 같은 결과가
+        수십 MB 텍스트. 실패 시 빈 문자열(호출측 비치명 처리)."""
+        try:
+            resp = await self._read_client.post(
+                self.query_url,
+                auth=self._auth,
+                data={"query": query},
+                headers={"Accept": "text/csv"},
+                timeout=timeout,
+            )
+            return resp.text if resp.status_code == 200 else ""
+        except Exception:
+            return ""
 
     async def clean_subclassof_noise(self, graph_name: Optional[str] = None) -> bool:
         """subClassOf 정제 — 부모가 클래스가 아니라 *속성(관계)*인 잘못된 is-a 엣지를 제거.
@@ -554,23 +645,33 @@ INSERT DATA {{ GRAPH {control} {{ {marker} xgen:ingestCommitted true . }} }}
         # 라벨이 REQUIRED 면 KG 빌더 path 중 라벨 누락된 잔존 인스턴스가 결과에서 빠져
         # 그 인스턴스 관련 instanceOf / 인스턴스간 관계 엣지도 일괄 누락 (s/o not in nodes).
         # OPTIONAL + URI local name fallback 으로 모든 인스턴스 보장.
+        #
+        # ⚠️성능: `?cls rdf:type owl:Class` 검증을 넣으면 인스턴스(15만)×클래스(44만)
+        # 교차 조인으로 대용량 그래프에서 폭발한다(mixed20k 실측 83s→프론트 30s
+        # 타임아웃→빈 그래프). 이 검증은 불필요 — 인스턴스의 rdf:type 은 도메인 클래스
+        # (인물/기관/…)와 owl:NamedIndividual 뿐이라, 후자만 FILTER 로 빼면 나머지가 곧
+        # 도메인 클래스다. 검증 제거로 83s→0.0s (실측, 결과 동일). NamedIndividual 자기
+        # 타입은 시각화에서 클래스 노드가 아니므로 제외한다.
         inst_query = f"""{prefixes}
         SELECT ?inst ?label ?cls WHERE {wrap('''
             ?inst rdf:type owl:NamedIndividual .
             ?inst rdf:type ?cls .
-            ?cls rdf:type owl:Class .
+            FILTER(?cls != owl:NamedIndividual)
             OPTIONAL {{ ?inst rdfs:label ?label . FILTER(LANG(?label) = "ko" || LANG(?label) = "") }}
         ''')}
         LIMIT {limit}
         """
         # 6) 인스턴스 간 관계 (도메인 특화 프로퍼티)
+        # ⚠️성능: 이전엔 s·o 를 owl:NamedIndividual 로 잡고 ?s ?p ?o (자유 술어)를
+        # FILTER 로 걸러, 15만 인스턴스의 모든 트리플을 스캔해 대용량에서 ~16s 걸렸다.
+        # 술어를 owl:ObjectProperty 로 한정하면(관계는 정의상 ObjectProperty) 관계
+        # 트리플만 조회 → 16s→0.5s (실측, 결과 동일). s 는 인스턴스 검증 유지, o 는
+        # ObjectProperty range 라 자동 인스턴스(무검증으로 조인 1개 절약).
         inst_rel_query = f"""{prefixes}
-        PREFIX ns: <https://w3id.org/xgen-domain#>
         SELECT ?s ?p ?o WHERE {wrap('''
-            ?s rdf:type owl:NamedIndividual .
-            ?o rdf:type owl:NamedIndividual .
+            ?p rdf:type owl:ObjectProperty .
             ?s ?p ?o .
-            FILTER(?p != rdf:type && !STRSTARTS(STR(?p), STR(rdfs:)) && !STRSTARTS(STR(?p), STR(owl:)))
+            ?s rdf:type owl:NamedIndividual .
         ''')}
         LIMIT {limit}
         """
