@@ -143,3 +143,48 @@ git/버전 핀으로 전환해야 하며, 그 전에 아래 중 하나를 결정
   누락 메서드 없이 컴파일/타입체크 단계에서 걸린다. 이게 이 리포의 존재 이유(백엔드 스왑)의 척추다.
 - 과제: FusekiBackend 표면(계약표)의 시그니처를 Protocol 로 승격. 시그니처는 백엔드에서 정확히 미러링.
   `sparql_query`/`sparql_update` 같은 raw escape 는 Protocol 에 넣을지(백엔드 중립성 훼손) 별도 판단.
+
+---
+
+## G. 추출 신선도 — 패키지가 정본보다 낡는다 (2026-08-24 실측)
+
+**사고**: `74a322a` 는 `fuseki_client.py` 를 `8a81e23` 시점에서 추출했는데, 정본
+계보(`xgen-documents` `ontology-search`, develop 대비 +52)는 이미 그 앞을 지나 있었다.
+추출본은 **실측 채택된 수리 4건을 조용히 되돌렸다**:
+
+| 잃은 수리 | 근거 |
+|---|---|
+| `compact_dataset` / `has_active_compact` | TDB2 copy-on-write 팽창(1.4GB→121GB, 0715) + 0814 배타대기 사고 |
+| `sparql_query_csv` | 44만 행 JSON bindings 로 컨테이너 OOM |
+| `sparql_query` 로그 상한(50행) | 40.8만 행 덤프로 도커 로그 179MB |
+| `get_graph_data_for_visualization` 성능 | owl:Class 조인 제거 83s→0.0s, ObjectProperty 한정 16s→0.5s |
+
+**왜 안 보이나**: 메서드 이름은 전부 있어서 import 도 되고 테스트도 통과한다.
+`FusekiClient` → `FusekiBackend` 스왑 시 `sparql_query_csv` 만 AttributeError 로
+터지고(pipeline.py 10곳), 나머지 3건은 **아무 신호 없이 성능·안정성만 되돌아간다.**
+
+→ `b0f8c2a` 에서 4건 전량 전방이식(본문 바이트 동일).
+
+### 남은 낡음 — `queries.py` 빌더 7/30
+
+`queries.py` 도 develop 계보에서 추출됐다. 함수 단위 실측(`eval_runs/graphdb_selection/extraction_freshness.py`):
+
+| 빌더 | 정본에서 바뀐 것 |
+|---|---|
+| `seed_chunk_relations_query` | `_seed_chunk_neighborhood` — SVO/`coOccursWith` **슬롯 분리**(단일 LIMIT 는 SVO 가 선점해 co-occ 0, mixed20k 실측) |
+| `seed_connectivity_relations_query` | `_seed_graph_by_label` — 술어 필터 변경 |
+| `seed_relations_broad_query` | 〃 |
+| `seed_classes_by_fulltext_query` | `_seed_classes` — `subClassOf*` 이행폐포 + `owl:equivalentClass` 동치폐포(R9, 국가 11→16) + `ONTOLOGY_CLASS_SEED` off/direct/closure 모드 + `?directs` 컬럼 |
+| `merge_move_subject_update` / `..._object_update` / `merge_normalized_instances_select` | `_merge_normalized_instances` — **병합 저널 사이드카**(`__id_journal`). 물리 병합이 비가역이라 도입 |
+
+신선 23 / 낡음 7 / 판정불가 0.
+**나머지 23개(browse·CRUD·community·rename·fulltext forward/reverse·predicate_labels)는 정본과 동일** —
+`graph_rag_operations.py`·`community_detect.py` 는 SPARQL 변경 0줄이다.
+
+⚠️ 낡은 7개는 **Neo4j/Arcade 로도 그대로 이식됐다.** 즉 측정된 파리티 98~100% 는
+*낡은 Fuseki 기준선* 에 대한 파리티다. 정본 재추출 후 파리티를 다시 재야 한다.
+
+### 규범 — 재추출은 머지 순서에 종속된다
+`ontology-search`(+52) 와 `feature/ontology-store-b1`(+9) 은 서로를 모르는 미배포 2브랜치다.
+**`ontology-search` 를 먼저 develop 에 넣고, 그 위에서 seam 을 다시 뜬다.** 반대로 하면
+b1 의 추출본이 정본을 덮어 위 7건이 되살아난다. 머지 전 게이트 통과(exit 0) 를 관문으로 둔다.
