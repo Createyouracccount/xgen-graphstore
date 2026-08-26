@@ -165,26 +165,41 @@ git/버전 핀으로 전환해야 하며, 그 전에 아래 중 하나를 결정
 
 → `b0f8c2a` 에서 4건 전량 전방이식(본문 바이트 동일).
 
-### 남은 낡음 — `queries.py` 빌더 7/30
+### 질의 빌더 낡음 — 해소 (`6ce3c74`)
 
-`queries.py` 도 develop 계보에서 추출됐다. 함수 단위 실측(`eval_runs/graphdb_selection/extraction_freshness.py`):
+`queries.py` 도 develop 계보에서 추출됐다. 함수 단위 실측으로 30개 중 7개가 지목됐고,
+전수 대조 결과 **실제로 틀린 것은 3개 + 아예 없던 것 2개**였다(나머지 4개는 함수 단위
+게이트의 거짓양성 — 바이트 동일 확인).
 
-| 빌더 | 정본에서 바뀐 것 |
+| 빌더 | 무엇이 없었나 |
 |---|---|
-| `seed_chunk_relations_query` | `_seed_chunk_neighborhood` — SVO/`coOccursWith` **슬롯 분리**(단일 LIMIT 는 SVO 가 선점해 co-occ 0, mixed20k 실측) |
-| `seed_connectivity_relations_query` | `_seed_graph_by_label` — 술어 필터 변경 |
-| `seed_relations_broad_query` | 〃 |
-| `seed_classes_by_fulltext_query` | `_seed_classes` — `subClassOf*` 이행폐포 + `owl:equivalentClass` 동치폐포(R9, 국가 11→16) + `ONTOLOGY_CLASS_SEED` off/direct/closure 모드 + `?directs` 컬럼 |
-| `merge_move_subject_update` / `..._object_update` / `merge_normalized_instances_select` | `_merge_normalized_instances` — **병합 저널 사이드카**(`__id_journal`). 물리 병합이 비가역이라 도입 |
+| `seed_chunk_relations_query` | `FILTER(?p != :coOccursWith)`. 정본은 정밀 SVO 와 동시출현 약관계를 **슬롯 분리**한다 — 단일 정렬 LIMIT 는 SVO 가 항상 선점해 co-occ 가 0 이 되기 때문(mixed20k 실측) |
+| `seed_chunk_cooccurrence_query` | **빌더 자체가 없음.** 약관계 슬롯. 술어가 단일이라 `?pLabel` 미조회(ko/en 2행 중복으로 슬롯 절반 낭비 방지) |
+| `seed_connectivity_relations_query` | 동일 필터. ⚠️ `seed_relations_broad` 에는 **일부러 안 건다** — recall 폴백이자 SVO 희소 구간의 유일한 관계원 |
+| `seed_classes_by_fulltext_query` | `owl:equivalentClass` 동치폐포(R9, 국가 11→16) + `rdfs:subClassOf*` 이행폐포 + `?directs`(150캡에서 폐포가 직접 인스턴스를 밀어내지 않도록 주입순서 고정) + `ONTOLOGY_CLASS_SEED` 모드 |
+| `merge_journal_insert_update` | **빌더 자체가 없음.** 물리 병합이 비가역이라 `__id_journal` 에 `(canonical, mergedFrom, old)` 를 남긴다. **실서버 Fuseki 에 해당 그래프 실재 확인** |
 
-신선 23 / 낡음 7 / 판정불가 0.
-**나머지 23개(browse·CRUD·community·rename·fulltext forward/reverse·predicate_labels)는 정본과 동일** —
-`graph_rag_operations.py`·`community_detect.py` 는 SPARQL 변경 0줄이다.
+5건 전량 정본 재구성과 **바이트 동일** 확인 후 `test_golden_sealed.py` 에 봉인.
 
-⚠️ 낡은 7개는 **Neo4j/Arcade 로도 그대로 이식됐다.** 즉 측정된 파리티 98~100% 는
-*낡은 Fuseki 기준선* 에 대한 파리티다. 정본 재추출 후 파리티를 다시 재야 한다.
+**LPG 도 같은 결함이었다** — 두 백엔드의 청크 시드가 *낡은 Fuseki 질의의 이식본*이라
+동시출현 엣지를 정밀 슬롯에 섞고 있었고 분리 슬롯이 없었다. 양쪽 수정 →
+`GRAPH_SEARCH` **3백엔드 전부 8/8**.
+
+### 게이트 — 이식 후에도 쓸 수 있게
+
+`eval_runs/graphdb_selection/extraction_freshness.py` (exit 1 = 낡음).
+빌더별 **대조 기준점**(`extraction_baseline.json`)을 두어, 대조를 마친 빌더는 그 커밋
+이후의 변경만 센다. 안 그러면 이식 후에도 영구 적색이라 아무도 안 본다.
+현재 **신선 33 / 낡음 0 / 판정불가 0**.
+음성 대조 2회로 자명한 초록이 아님을 확인했다(기준점 제거 · 기준점 30커밋 후퇴 → 둘 다 적색).
 
 ### 규범 — 재추출은 머지 순서에 종속된다
 `ontology-search`(+52) 와 `feature/ontology-store-b1`(+9) 은 서로를 모르는 미배포 2브랜치다.
 **`ontology-search` 를 먼저 develop 에 넣고, 그 위에서 seam 을 다시 뜬다.** 반대로 하면
-b1 의 추출본이 정본을 덮어 위 7건이 되살아난다. 머지 전 게이트 통과(exit 0) 를 관문으로 둔다.
+b1 의 추출본이 정본을 덮는다. 머지 전 게이트 통과(exit 0) 를 관문으로 둔다.
+
+### 남은 것
+- `graph_browse` LPG **0/7** — `node_properties`·`property_values`·`neighbors` 는
+  `OntologyStore` **Protocol 선언 메서드인데 LPG 미구현**이다(패키지가 자기 계약 위반).
+- `ontology_build` neo4j 8/16 · arcade 2/16.
+- 이식 후 Neo4j·Arcade **파리티 재측정** — 기존 98~100% 는 낡은 기준선에 대한 값이다.
