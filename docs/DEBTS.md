@@ -80,6 +80,37 @@ RDF named graph(`GRAPH <g>` / `WITH <g>`)는 LPG에 없다. collection별 속성
 - `get_tbox_schema`, `get_graph_data_for_visualization`, `count_classes`/`count_properties`,
   `clean_subclassof_noise`, `materialize_property_inheritance`.
 
+## D-2. `graph_browse` 는 이식 과제가 아니다 — LPG 리터럴 모델에 막혀 있다 (0824 실측)
+
+프리플라이트가 `graph_browse` 를 LPG **0/7** 로 보고한다. 그중 `node_properties`·
+`property_values`·`neighbors` 는 `OntologyStore` **Protocol 이 선언한 메서드**라, 패키지가
+자기 계약을 못 지키는 상태다. 그런데 원인을 파보니 **Cypher 를 못 써서가 아니다.**
+
+`ntriples.py` 의 리터럴 이관이 정보를 두 가지 버린다:
+
+| 버리는 것 | 근거 |
+|---|---|
+| **술어 네임스페이스** | `parse_literals`: `key = localname(p)` — `<…#설립연도>` 가 `설립연도` 로만 남는다 |
+| **언어 태그** | `_LITERAL_RE` 가 `(?:@[\w-]+\|\^\^<[^>]+>)?` 를 **비캡처**로 흘린다 |
+
+그 결과:
+
+1. **`node_properties` 는 `property_uri` 를 정직하게 낼 수 없다.** 리터럴 속성의 원 URI 가
+   사라졌다. `NS_DOMAIN + key` 로 되살리는 건 **네임스페이스를 추측하는 것**이라
+   프로젝트 원칙("회색지대 기본값 금지")에 정면으로 어긋난다. 서로 다른 네임스페이스의
+   같은 localname 은 LPG 에서 이미 한 칸에 뭉쳐 있다.
+2. **세 메서드 전부 `FILTER(LANG(?x) = "ko" || LANG(?x) = "")` 를 재현할 수 없다.**
+   원본 browse 질의는 전부 이 필터를 쓴다. LPG 에는 언어 정보가 없어 ko/en 라벨이
+   구분 없이 리스트에 섞여 있다(실측: `coOccursWith` 라벨이 "함께언급"·"co-occurs with" 둘 다).
+   필터 없이 내면 화면에 영어 라벨이 섞여 나오는데, **조용히 다른 결과**다.
+
+→ **선행 과제는 리터럴 모델 확장**이다(술어 URI 보존 + 언어 태그 보존). 그게 되기 전에
+`graph_browse` 를 "이식"하면 추측값과 언어 혼입을 제품에 넣는 것이다. 지금은
+`require_workload(store, Workload.GRAPH_BROWSE)` 가 **명시적으로 차단**하는 편이 옳다.
+
+⚠️ 이 손실은 browse 에만 국한되지 않는다 — 이미 적재된 LPG 그래프는 언어 정보를 **복구할 수
+없다.** 모델을 고치면 **재적재가 필요하다.**
+
 ## E. 기타
 - `upload_ttl`(Turtle 문자열) → LPG CSV/`UNWIND`+`MERGE`.
 - `triple_exists` ASK 멱등가드 → LPG `MERGE`/`EXISTS` 의미로 재편.
