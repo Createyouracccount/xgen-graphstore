@@ -30,6 +30,7 @@ from xgen_graphstore.ntriples import (  # noqa: E402
 )
 # 검색 의미(제외 술어·핀 파싱·RDF 상수)는 백엔드 공통 — ntriples 가 단일 출처.
 from xgen_graphstore.ntriples import (  # noqa: E402
+    NS_DOMAIN as _NS_DOMAIN,
     EXCLUDED_PREDS as _EXCLUDED_PREDS,
     OWL_CLASS as _OWL_CLASS,
     RDF_TYPE as _RDF_TYPE,
@@ -40,6 +41,9 @@ from xgen_graphstore.ntriples import (  # noqa: E402
 def _q(s: str) -> str:
     """Cypher 이중따옴표 리터럴 이스케이프(PoC — 파라미터 대신)."""
     return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+_COOC_URI = _NS_DOMAIN + "coOccursWith"
 
 
 class ArcadeBackend:
@@ -333,6 +337,9 @@ class ArcadeBackend:
             f'MATCH (s:Resource)-[r:REL {{g:"{g}"}}]->(o:Resource) '
             f'WHERE s.sourceChunk IS NOT NULL AND any(c IN s.sourceChunk WHERE c IN [{clist}]) '
             f'  AND s.label IS NOT NULL AND o.label IS NOT NULL '
+            # 0824: 정본이 정밀 SVO 와 동시출현 약관계를 슬롯 분리한다(coarse 엣지의
+            # LIMIT 선점 방지). 동시출현 슬롯은 seed_chunk_cooccurrence.
+            f'  AND r.p <> "{_q(_COOC_URI)}" '
         )
         with_label = await self._cmd(
             head + 'WITH s, o, r MATCH (p:Resource {uri:r.p}) WHERE p.label IS NOT NULL '
@@ -359,6 +366,24 @@ class ArcadeBackend:
                 f'RETURN DISTINCT sLabel, oLabel LIMIT {remaining}'
             ) or []
         return self._bindings(with_label + no_label)
+
+    async def seed_chunk_cooccurrence(self, graph_name: str, values: str, limit: int):
+        """동시출현 약관계 슬롯 (0824). 술어가 단일이라 pLabel 을 조회하지 않는다 —
+        따라서 seed_chunk_relations 를 괴롭히던 OPTIONAL 조인 우회가 필요 없다."""
+        chunks = [_unescape(v) for v in re.findall(r'"((?:[^"\\]|\\.)*)"', values or "")]
+        if not chunks:
+            return self._bindings([])
+        g = _q(graph_name)
+        clist = ",".join(f'"{_q(c)}"' for c in chunks)
+        rows = await self._cmd(
+            f'MATCH (s:Resource)-[r:REL {{g:"{g}"}}]->(o:Resource) '
+            f'WHERE s.sourceChunk IS NOT NULL AND any(c IN s.sourceChunk WHERE c IN [{clist}]) '
+            f'  AND s.label IS NOT NULL AND o.label IS NOT NULL '
+            f'  AND r.p = "{_q(_COOC_URI)}" '
+            'UNWIND s.label AS sLabel UNWIND o.label AS oLabel '
+            f'RETURN DISTINCT sLabel, oLabel LIMIT {int(limit)}'
+        ) or []
+        return self._bindings(rows)
 
     async def predicate_labels(self, graph_name: str):
         """술어 + 라벨. 원본 SPARQL 은 `?p rdfs:label ?pl` 필수 패턴이라 label 없는 술어는 제외."""

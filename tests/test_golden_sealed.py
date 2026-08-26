@@ -66,6 +66,78 @@ def test_sealed_text_query_thresholds():
     assert '"삼성 인수" 30)' in q.seed_classes_by_fulltext_query(GRAPH, TERMS)
 
 
+# ── 0824 전방이식분 봉인 ──
+#
+# 추출본이 정본보다 낡아 실측 채택 동작이 조용히 되돌아간 사고(DEBTS §G) 뒤에 봉인한다.
+# 이 문자열들은 xgen-documents `ontology-search` 정본과 바이트 동일임을 확인하고 고정했다.
+
+_NS = "https://w3id.org/xgen-domain#"
+_PRED = ("FILTER(?p != rdf:type && ?p != rdfs:label && ?p != :sourceChunk "
+         "&& ?p != :sourceDocument && ?p != :scsContextSummary) ")
+_CHUNK_BASE = (
+    f"PREFIX : <{_NS}> PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> "
+    "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> "
+    f"SELECT DISTINCT ?sLabel ?pLabel ?oLabel WHERE {{ GRAPH <{GRAPH}> {{ "
+    f"VALUES ?c {{ {VALUES} }} ?s :sourceChunk ?c . ?s rdfs:label ?sLabel . ?s ?p ?o . " + _PRED)
+
+
+def test_sealed_chunk_seed_slot_split():
+    """정밀 SVO 와 동시출현 약관계는 **슬롯이 나뉘어야** 한다.
+
+    단일 정렬 LIMIT 는 SVO 가 항상 선점해 co-occ 가 0 이 된다(mixed20k 실측).
+    두 슬롯이 같은 base 를 공유하되 술어 필터만 반대인 것이 계약이다.
+    """
+    assert q.seed_chunk_relations_query(GRAPH, VALUES, 60) == (
+        _CHUNK_BASE + "FILTER(?p != :coOccursWith) "
+        "?o rdfs:label ?oLabel . OPTIONAL { ?p rdfs:label ?pLabel } } } LIMIT 60")
+    # cq 는 술어가 단일이라 ?pLabel 을 조회하지 않는다(ko/en 2행 중복으로 슬롯 낭비 방지).
+    assert q.seed_chunk_cooccurrence_query(GRAPH, VALUES, 12) == (
+        _CHUNK_BASE.replace("?sLabel ?pLabel ?oLabel", "?sLabel ?oLabel")
+        + "FILTER(?p = :coOccursWith) ?o rdfs:label ?oLabel . } } LIMIT 12")
+
+
+def test_sealed_connectivity_excludes_cooccurrence():
+    """정밀 시드(connectivity)는 동시출현을 제외하고, recall 폴백(broad)은 포함한다.
+
+    broad 에까지 걸면 SVO 가 없는 희소 구간의 유일한 recall 을 잃는다.
+    """
+    conn = q.seed_connectivity_relations_query(GRAPH, TERMS, LIMIT)
+    broad = q.seed_relations_broad_query(GRAPH, TERMS, LIMIT)
+    assert "FILTER(?s != ?o) " + _PRED + "FILTER(?p != :coOccursWith) " in conn
+    assert ":coOccursWith" not in broad
+
+
+def test_sealed_class_seed_closures():
+    """클래스 시드의 폐포 2종 — 없으면 동의어·하위클래스로 도달하던 인스턴스를 잃는다."""
+    eq = "?c (owl:equivalentClass|^owl:equivalentClass)* ?ceq . "
+    closure = q.seed_classes_by_fulltext_query(GRAPH, TERMS)          # 기본 = closure
+    direct = q.seed_classes_by_fulltext_query(GRAPH, TERMS, "direct")
+    assert eq in closure and eq in direct                              # 동치 폐포는 양쪽 공통
+    assert "?sub rdfs:subClassOf* ?ceq . ?i rdf:type ?sub" in closure  # 이행 폐포는 closure 만
+    assert "rdfs:subClassOf*" not in direct
+    assert "?i rdf:type ?ceq . ?i rdfs:label ?il . BIND(?il AS ?dl) " in direct
+    # ?directs — 150캡에서 폐포가 직접 인스턴스를 밀어내지 않도록 주입순서 고정용
+    for got in (closure, direct):
+        assert "(GROUP_CONCAT(DISTINCT ?dl; SEPARATOR=' | ') AS ?directs)" in got
+
+
+def test_sealed_merge_journal_precedes_irreversible_move():
+    """병합 저널 — DELETE/INSERT 물리 병합이 비가역이라 역추적 근거를 남긴다."""
+    can = "https://w3id.org/xgen-instance#한국마사회"
+    uri = can + "를"
+    assert q.merge_journal_insert_update(GRAPH, can, uri, "한국마사회를") == (
+        f"INSERT DATA {{ GRAPH <{GRAPH}__id_journal> {{ "
+        f"<{can}> <{_NS}mergedFrom> <{uri}> . "
+        f'<{uri}> <{_NS}mergedLabel> "한국마사회를"@ko }} }}')
+
+
+def test_search_workload_contract_covers_both_chunk_slots():
+    """워크로드 계약이 두 슬롯을 모두 요구해야 백엔드 스왑 시 결손이 드러난다."""
+    from xgen_graphstore.capabilities import Workload, WORKLOAD_METHODS
+    ms = WORKLOAD_METHODS[Workload.GRAPH_SEARCH]
+    assert "seed_chunk_relations" in ms and "seed_chunk_cooccurrence" in ms
+
+
 # ── 목-transport 파싱 등가 ──
 
 class _Mock(FusekiBackend):

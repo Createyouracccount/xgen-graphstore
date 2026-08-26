@@ -180,8 +180,16 @@ class FusekiBackend(FusekiClient):
     # 시드 파싱은 호출부에 남기고(관계/클래스 조립), 여기선 쿼리 방출·원 결과 반환.
 
     async def seed_chunk_relations(self, graph_name: str, values: str, limit: int):
-        """원본: multi_turn_rag gq (~223). VALUES 청크 1홉 시드."""
+        """원본: multi_turn_rag `gq`. VALUES 청크 1홉 시드 — **정밀 SVO 슬롯**."""
         return await self.sparql_query(q.seed_chunk_relations_query(graph_name, values, limit))
+
+    async def seed_chunk_cooccurrence(self, graph_name: str, values: str, limit: int):
+        """원본: multi_turn_rag `cq` (0824 전방이식). **동시출현 약관계 슬롯**.
+
+        정밀 SVO 와 슬롯을 나눠야 한다 — 단일 정렬 LIMIT 는 SVO 가 항상 선점해
+        co-occ 가 0 이 된다(mixed20k 실측). limit 은 호출부가 `max(10, N//5)` 로 준다.
+        """
+        return await self.sparql_query(q.seed_chunk_cooccurrence_query(graph_name, values, limit))
 
     async def predicate_labels(self, graph_name: str):
         """원본: multi_turn_rag _pred_labels (~503). 순수 SPARQL."""
@@ -207,9 +215,16 @@ class FusekiBackend(FusekiClient):
         return await self.sparql_query(
             q.seed_relations_broad_query(graph_name, terms, limit))
 
-    async def seed_classes_by_fulltext(self, graph_name: str, terms: str):
-        """원본: multi_turn_rag q (~647). ⚠️text:query — 부채."""
-        return await self.sparql_query(q.seed_classes_by_fulltext_query(graph_name, terms))
+    async def seed_classes_by_fulltext(self, graph_name: str, terms: str,
+                                       mode: str = "closure"):
+        """원본: multi_turn_rag `_seed_classes.q`. ⚠️text:query — 부채.
+
+        mode 는 호출부 env `ONTOLOGY_CLASS_SEED` 를 그대로 넘긴다("closure"/"direct").
+        기본값은 운영 컨테이너 설정과 같은 `closure` — 0824 전방이식 전에는 폐포가
+        아예 없어 동치·이행 관계로 도달하던 인스턴스를 놓치고 있었다.
+        """
+        return await self.sparql_query(
+            q.seed_classes_by_fulltext_query(graph_name, terms, mode))
 
     # ── B4: graph_rag WRITE ──
     # ASK 멱등가드(triple_exists 사전확인·사후검증)는 호출부에 유지. 여기선 방출·전송만.
@@ -240,6 +255,16 @@ class FusekiBackend(FusekiClient):
     async def merge_move_object(self, graph_name: str, uri: str, canonical: str) -> bool:
         """원본: _merge_* 목적어면 이동 (pipeline.py ~2777/2832)."""
         return await self.sparql_update(q.merge_move_object_update(graph_name, uri, canonical))
+
+    async def merge_journal_insert(self, graph_name: str, canonical: str, uri: str,
+                                   label_escaped: str) -> bool:
+        """원본: `_merge_normalized_instances` 병합 저널 (0824 전방이식).
+
+        물리 병합(`merge_move_*`)은 비가역이라 저널을 **먼저** 남긴다. 이 메서드 없이
+        스왑하면 저널이 조용히 사라진다.
+        """
+        return await self.sparql_update(
+            q.merge_journal_insert_update(graph_name, canonical, uri, label_escaped))
 
     async def merge_normalized_instances_labels(self, graph_name: str):
         """원본: _merge_normalized_instances SELECT (pipeline.py ~2736). 원 결과 반환."""

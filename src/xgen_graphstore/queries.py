@@ -213,22 +213,52 @@ def community_tag_insert_update(graph_name: str, triples: str) -> str:
 
 
 # multi_turn_rag READ — seed 쿼리 (일부 text:query=jena-text 전용, 부채는 원장 기록)
+def _CHUNK_SEED_BASE(graph_name: str, values: str, projection: str) -> str:
+    """원본: multi_turn_rag.py `_seed_chunk_neighborhood` 의 `base`. 바이트 동일이며
+    projection 만 갈아끼운다
+    (정본은 `base.replace("?sLabel ?pLabel ?oLabel", "?sLabel ?oLabel")` 로 같은 일을 한다)."""
+    return (
+        f"PREFIX : <{_NS}> "
+        "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> "
+        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> "
+        f"SELECT DISTINCT {projection} WHERE {{ GRAPH <{graph_name}> {{ "
+        f"VALUES ?c {{ {values} }} "
+        "?s :sourceChunk ?c . ?s rdfs:label ?sLabel . ?s ?p ?o . "
+        "FILTER(?p != rdf:type && ?p != rdfs:label && ?p != :sourceChunk "
+        "&& ?p != :sourceDocument && ?p != :scsContextSummary) "
+    )
+
+
 def seed_chunk_relations_query(graph_name: str, values: str, limit: int) -> str:
     """원본: multi_turn_rag.py gq (~211-222). VALUES 바인딩 1홉 관계 시드.
 
     values 는 호출부가 `" ".join(f'"{c}"' ...)` 로 조립한 청크 리터럴 목록.
     (VALUES 바인딩은 LPG 파라미터 리스트로 자연 이식 — 부채 아님.)
+
+    ⚠️ 0824 전방이식: `FILTER(?p != :coOccursWith)` 가 빠져 있었다. 정본은 정밀 SVO 와
+    동시출현 약관계를 **슬롯 분리**한다 — 단일 정렬 LIMIT 는 SVO 가 항상 선점해
+    co-occ 가 0 이 되기 때문(mixed20k 실측). 약관계는 `seed_chunk_cooccurrence_query`.
     """
     return (
-        f"PREFIX : <{_NS}> "
-        "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> "
-        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> "
-        f"SELECT DISTINCT ?sLabel ?pLabel ?oLabel WHERE {{ GRAPH <{graph_name}> {{ "
-        f"VALUES ?c {{ {values} }} "
-        "?s :sourceChunk ?c . ?s rdfs:label ?sLabel . ?s ?p ?o . "
-        "FILTER(?p != rdf:type && ?p != rdfs:label && ?p != :sourceChunk "
-        "&& ?p != :sourceDocument && ?p != :scsContextSummary) "
+        _CHUNK_SEED_BASE(graph_name, values, "?sLabel ?pLabel ?oLabel")
+        + "FILTER(?p != :coOccursWith) "
         "?o rdfs:label ?oLabel . OPTIONAL { ?p rdfs:label ?pLabel } } } "
+        f"LIMIT {limit}"
+    )
+
+
+def seed_chunk_cooccurrence_query(graph_name: str, values: str, limit: int) -> str:
+    """원본: multi_turn_rag.py `cq` (_seed_chunk_neighborhood). 동시출현 약관계 슬롯.
+
+    정밀 SVO(`seed_chunk_relations_query`) 와 **별도 소량 슬롯**으로 뒤에 append 한다.
+    술어가 `:coOccursWith` 단일이라 `?pLabel` 을 조회하지 않는다 — ko/en 라벨 2행 중복으로
+    슬롯 절반이 낭비되는 것을 막기 위함이며, 표기는 호출부에서 "함께언급" 으로 고정한다.
+
+    limit 은 호출부가 `max(10, SEED_REL_LIMIT // 5)` 로 계산해 넘긴다(빌더는 방출만).
+    """
+    return (
+        _CHUNK_SEED_BASE(graph_name, values, "?sLabel ?oLabel")
+        + "FILTER(?p = :coOccursWith) ?o rdfs:label ?oLabel . } } "
         f"LIMIT {limit}"
     )
 
@@ -278,6 +308,9 @@ def seed_connectivity_relations_query(graph_name: str, terms: str, limit: int) -
         f'(?o ?sc2) text:query (rdfs:label "{terms}" 80) . '
         f"GRAPH <{graph_name}> {{ ?s rdfs:label ?sLabel . ?s ?p ?o . ?o rdfs:label ?oLabel . "
         "FILTER(?s != ?o) " + _PRED_FILTER +
+        # 0824 전방이식: 정밀 시드에선 동시출현 약관계를 제외한다 — coarse 엣지의
+        # LIMIT 선점 방지. (broad recall 폴백에는 포함 — SVO 없는 희소 구간을 메꾼다)
+        "FILTER(?p != :coOccursWith) "
         "OPTIONAL { ?p rdfs:label ?pLabel } } } "
         f"LIMIT {limit}"
     )
@@ -295,18 +328,42 @@ def seed_relations_broad_query(graph_name: str, terms: str, limit: int) -> str:
     )
 
 
-def seed_classes_by_fulltext_query(graph_name: str, terms: str) -> str:
-    """원본: multi_turn_rag.py q (~634-645). ⚠️text:query(jena-text) — 부채."""
+def seed_classes_by_fulltext_query(graph_name: str, terms: str,
+                                   mode: str = "closure") -> str:
+    """원본: multi_turn_rag.py `_seed_classes.q`. ⚠️text:query(jena-text) — 부채.
+
+    ⚠️ 0824 전방이식. 추출 당시 판본은 `?i rdf:type ?c` 뿐이었고, 정본이 그 뒤 채택한
+    폐포 2종과 `?directs` 컬럼이 빠져 있었다:
+
+    - **동치 폐포(R9)**: `?c (owl:equivalentClass|^owl:equivalentClass)* ?ceq` —
+      클래스 동의어 정규화가 넣은 링크를 양방향으로 따라간다('국가' 해소가 '나라'
+      클래스 인스턴스까지 도달, 실측 11→16). 링크가 없으면 zero-length path 라 무변경.
+    - **이행 폐포**: `?sub rdfs:subClassOf* ?ceq` — 매칭 클래스의 하위클래스 인스턴스까지
+      전수 포함. `*` 는 zero-length 포함이라 flat 온톨로지에선 순수 superset.
+    - **`?directs`**: 직접 타입 인스턴스를 따로 모은다. 150캡에서 폐포 인스턴스가 직접
+      인스턴스를 밀어내는 기계적 간섭을 막기 위해 주입 순서를 결정론으로 고정하는 용도.
+
+    mode 는 호출부 env `ONTOLOGY_CLASS_SEED` 를 그대로 받는다.
+    `"closure"`(운영 컨테이너 설정) / `"direct"`(폐포 없이 직접 타입만, A/B 계측용).
+    `"off"` 는 호출 자체를 하지 않는 것이므로 여기서 다루지 않는다.
+    """
+    eq = "?c (owl:equivalentClass|^owl:equivalentClass)* ?ceq . "
+    if mode == "direct":
+        type_path = eq + "?i rdf:type ?ceq . ?i rdfs:label ?il . BIND(?il AS ?dl) "
+    else:
+        type_path = (eq + "?sub rdfs:subClassOf* ?ceq . ?i rdf:type ?sub . ?i rdfs:label ?il . "
+                     "OPTIONAL { ?i rdf:type ?ceq . BIND(?il AS ?dl) } ")
     return (
         "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> "
         "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> "
         "PREFIX owl: <http://www.w3.org/2002/07/owl#> "
         "PREFIX text: <http://jena.apache.org/text#> "
         "SELECT (SAMPLE(?cll) AS ?cl) (COUNT(DISTINCT ?i) AS ?n) "
-        "(GROUP_CONCAT(DISTINCT ?il; SEPARATOR=' | ') AS ?insts) WHERE { "
+        "(GROUP_CONCAT(DISTINCT ?il; SEPARATOR=' | ') AS ?insts) "
+        "(GROUP_CONCAT(DISTINCT ?dl; SEPARATOR=' | ') AS ?directs) WHERE { "
         f'(?c ?sc) text:query (rdfs:label "{terms}" 30) . '
         f"GRAPH <{graph_name}> {{ ?c rdf:type owl:Class . ?c rdfs:label ?cll . "
-        "?i rdf:type ?c . ?i rdfs:label ?il } } "
+        + type_path + "} } "
         "GROUP BY ?c ORDER BY DESC(?n) LIMIT 3"
     )
 
@@ -386,6 +443,25 @@ def merge_normalized_instances_select(graph_name: str) -> str:
         'PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> '
         f'SELECT ?i ?l WHERE {{ GRAPH <{graph_name}> {{ '
         '?i a owl:NamedIndividual ; rdfs:label ?l . FILTER(lang(?l) = "ko") } }'
+    )
+
+
+def merge_journal_insert_update(graph_name: str, canonical: str, uri: str,
+                                label_escaped: str) -> str:
+    """원본: pipeline.py `_merge_normalized_instances` 병합 저널 사이드카 (0824 전방이식).
+
+    DELETE/INSERT 물리 병합은 **비가역**이라, `(canonical, mergedFrom, old)` 와 옛 라벨을
+    `<graph>__id_journal` 별도 그래프에 남겨 감사·역추적을 가능하게 한다.
+    추출 당시 판본엔 없었다 — 병합 이동(`merge_move_*`)만 이관돼, 이 빌더 없이 스왑하면
+    **저널이 조용히 사라진다**(실서버 Fuseki 에 해당 그래프 실재 확인, 0824).
+
+    label_escaped 는 호출부가 이스케이프한 리터럴 본문이다 — 이 모듈의 계약상
+    IRI/리터럴 이스케이프는 도메인(호출부)에 남긴다.
+    """
+    return (
+        f"INSERT DATA {{ GRAPH <{graph_name}__id_journal> {{ "
+        f"<{canonical}> <{_NS}mergedFrom> <{uri}> . "
+        f'<{uri}> <{_NS}mergedLabel> "{label_escaped}"@ko }} }}'
     )
 
 

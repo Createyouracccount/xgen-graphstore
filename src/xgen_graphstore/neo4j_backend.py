@@ -31,6 +31,7 @@ from xgen_graphstore.capabilities import Capability, METHOD_CAPABILITY
 # N-Triples 파싱은 백엔드 공통(ntriples 모듈) — 백엔드마다 다르게 파싱하면 같은 입력이
 # 백엔드별로 다른 그래프가 되어 스왑 계약이 깨진다. 아래는 기존 이름 유지를 위한 얇은 별칭.
 from xgen_graphstore.ntriples import (  # noqa: E402
+    NS_DOMAIN as _NS_DOMAIN,
     group_literals_by_key as _group_literals_by_key,
     localname as _localname,
     parse_literals as _parse_literals,
@@ -73,6 +74,9 @@ def _lucene_escape(terms: str) -> str:
             out.append(ch)
     return "".join(out)
 
+
+
+_COOC_URI = _NS_DOMAIN + "coOccursWith"
 
 
 class Neo4jBackend:
@@ -528,12 +532,37 @@ class Neo4jBackend:
             "MATCH (s:Resource)-[r:REL {g: $g}]->(o:Resource) "
             "WHERE s.sourceChunk IS NOT NULL AND any(c IN s.sourceChunk WHERE c IN $chunks) "
             "  AND s.label IS NOT NULL AND o.label IS NOT NULL "
+            # 0824: 정본이 정밀 SVO 와 동시출현 약관계를 슬롯 분리한다. 이 슬롯에서
+            # coOccursWith 를 빼지 않으면 coarse 엣지가 LIMIT 를 선점한다.
+            "  AND r.p <> $cooc "
             "OPTIONAL MATCH (p:Resource {uri: r.p}) "
             "WITH s, o, coalesce(p.label, [null]) AS pls "
             "UNWIND s.label AS sLabel UNWIND pls AS pLabel UNWIND o.label AS oLabel "
             "RETURN DISTINCT sLabel, pLabel, oLabel "
             "LIMIT $limit",
-            g=graph_name, chunks=chunks, limit=int(limit),
+            g=graph_name, chunks=chunks, limit=int(limit), cooc=_COOC_URI,
+        )
+        return self._bindings(rows)
+
+    async def seed_chunk_cooccurrence(self, graph_name: str, values: str, limit: int):
+        """동시출현 약관계 슬롯 (0824). fulltext 무관 — VALUES 바인딩이라 Cypher 직역.
+
+        원본 SPARQL(`cq`): 같은 base 에 `FILTER(?p = :coOccursWith)` 를 걸고
+        **?pLabel 을 조회하지 않는다** — 술어가 단일이라 ko/en 라벨 2행 중복으로 슬롯
+        절반이 낭비되는 것을 막기 위함. 표기는 호출부가 "함께언급" 으로 고정한다.
+        """
+        chunks = self._parse_values(values)
+        if not chunks:
+            return self._bindings([])
+        rows = await self._run(
+            "MATCH (s:Resource)-[r:REL {g: $g}]->(o:Resource) "
+            "WHERE s.sourceChunk IS NOT NULL AND any(c IN s.sourceChunk WHERE c IN $chunks) "
+            "  AND s.label IS NOT NULL AND o.label IS NOT NULL "
+            "  AND r.p = $cooc "
+            "UNWIND s.label AS sLabel UNWIND o.label AS oLabel "
+            "RETURN DISTINCT sLabel, oLabel "
+            "LIMIT $limit",
+            g=graph_name, chunks=chunks, limit=int(limit), cooc=_COOC_URI,
         )
         return self._bindings(rows)
 

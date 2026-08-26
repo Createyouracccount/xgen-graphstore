@@ -101,7 +101,8 @@ WORKLOAD_METHODS: dict[Workload, tuple[str, ...]] = {
         "seed_relations_by_fulltext_forward",   # 정방향 정밀관계
         "seed_relations_by_fulltext_reverse",   # 역방향 정밀관계
         "predicate_labels",                     # 관계형 게이트
-        "seed_chunk_relations",                 # 1홉 확장(HippoRAG)
+        "seed_chunk_relations",                 # 1홉 확장(HippoRAG) — 정밀 SVO 슬롯
+        "seed_chunk_cooccurrence",              # 동시출현 약관계 슬롯(0824) — SVO 와 LIMIT 분리
     ),
     Workload.GRAPH_ALGO: ("community_detect", "pagerank"),
     # kg_builder.build_and_upload 실제 호출 순서(코드 실사):
@@ -114,6 +115,7 @@ WORKLOAD_METHODS: dict[Workload, tuple[str, ...]] = {
         "clean_subclassof_noise", "materialize_property_inheritance",
         "get_triple_count", "get_ingest_commit_marker", "commit_staged_graph",
         "merge_normalized_instances_labels", "merge_move_subject", "merge_move_object",
+        "merge_journal_insert",                 # 병합 저널(0824) — 물리 병합이 비가역이라 필수
         "same_label_nodes",
         "rename_move_subject", "rename_move_object", "rename_drop_old_label",
     ),

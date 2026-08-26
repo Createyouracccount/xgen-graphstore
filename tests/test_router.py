@@ -16,6 +16,7 @@ from xgen_graphstore import (
     require_workload,
     supports,
 )
+from xgen_graphstore.capabilities import WORKLOAD_METHODS
 
 
 def test_builtin_backends_registered():
@@ -131,7 +132,8 @@ def test_preflight_detects_search_unavailable_on_lpg():
     r = probe_workload(st, Workload.GRAPH_SEARCH)
     assert r["ok"] is False, "검색 미보유 백엔드는 워크로드 불가로 드러나야 함"
     assert "seed_chunk_relations" in r["present"]
-    assert len(r["missing"]) == 6
+    # 계약 크기를 상수로 박지 않는다 — 검색 메서드가 늘어도 "1개만 보유"라는 의도는 그대로다.
+    assert len(r["missing"]) == len(WORKLOAD_METHODS[Workload.GRAPH_SEARCH]) - 1
     assert r["backend"] == "partial"
 
 
@@ -143,11 +145,15 @@ def test_preflight_all_real_backends_search_complete():
 
 
 def test_preflight_neo4j_search_complete_after_port():
-    """Neo4j 는 fulltext 5종 이식으로 검색 워크로드 7/7 을 갖췄다(DEBTS §A 완료 신호)."""
+    """Neo4j 는 검색 워크로드를 **전량** 갖췄다(DEBTS §A 완료 신호).
+
+    fulltext 5종 이식(0823) + 동시출현 슬롯(0824). 계약이 늘었는데 백엔드가 안 따라오면
+    이 테스트가 먼저 깨진다 — 그게 "정본이 앞서갔다"의 신호다.
+    """
     neo = create_store({"backend": "neo4j"})
     r = probe_workload(neo, Workload.GRAPH_SEARCH)
     assert r["ok"] is True, f"검색 미보유 남음: {r['missing']}"
-    assert len(r["present"]) == 7
+    assert len(r["present"]) == len(WORKLOAD_METHODS[Workload.GRAPH_SEARCH])
 
 
 def test_preflight_fuseki_search_ok():
