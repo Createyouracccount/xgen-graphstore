@@ -4,6 +4,7 @@ import pytest
 
 from xgen_graphstore.neo4j_backend import (
     Neo4jBackend, _localname, _parse_literals, _parse_triples,
+    _group_literals_by_key,
 )
 
 RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
@@ -14,7 +15,11 @@ def test_literal_parsed_as_property_not_edge():
     """RDF 리터럴은 엣지가 아니라 노드 property 로 간다 — 리소스 트리플과 분리 파싱."""
     line = f'<http://x/a> <{RDFS_LABEL}> "한국은행" .\n'
     assert _parse_triples(line) == [], "리터럴은 리소스 트리플로 잡히면 안 됨"
-    assert _parse_literals(line) == [{"s": "http://x/a", "key": "label", "val": "한국은행"}]
+    assert _parse_literals(line) == [{
+        "s": "http://x/a", "key": "label", "val": "한국은행",
+        # 0827: 파서가 더는 버리지 않는다. key(localname)는 손실 축약이고 p 가 원본이다.
+        "p": RDFS_LABEL, "lang": "", "dtype": "",
+    }]
 
 
 def test_literal_escapes_and_lang_tag():
@@ -176,3 +181,57 @@ def test_owl_cleanup_uses_property_type_gate():
     from xgen_graphstore.neo4j_backend import Neo4jBackend
     for m in (Neo4jBackend.clean_subclassof_noise, Neo4jBackend.materialize_property_inheritance):
         assert "_PROPERTY_TYPES" in inspect.getsource(m) or "prop_types" in inspect.getsource(m)
+
+
+# ── 리터럴 모델 손실 재현 (DEBTS §D-2) — 백엔드 공통 파서 계약 ──
+
+def test_literal_keeps_predicate_uri():
+    """localname 만 남기면 서로 다른 네임스페이스의 같은 이름이 한 칸에 뭉친다.
+
+    실사고 맥락: `node_properties` 는 `?p` 를 **URI 로** 돌려줘야 하는데, localname 에서
+    `NS_DOMAIN + key` 로 되살리는 것은 네임스페이스 추측이라 '회색지대 기본값 금지' 위반이다.
+    """
+    lines = (
+        '<http://x/a> <https://w3id.org/xgen-domain#note> "가" .\n'
+        '<http://x/a> <http://other.example/ns#note> "나" .\n'
+    )
+    lits = _parse_literals(lines)
+    assert {l["p"] for l in lits} == {
+        "https://w3id.org/xgen-domain#note", "http://other.example/ns#note"
+    }, "술어 URI 가 보존돼야 한다 — key(localname) 만으로는 두 네임스페이스가 구분 불가"
+
+
+def test_literal_keeps_language_tag():
+    """원본 browse 질의는 전부 FILTER(LANG(?x)="ko" || LANG(?x)="") 를 쓴다.
+
+    실측 사고: coOccursWith 의 rdfs:label 이 "함께언급"(ko)·"co-occurs with"(en) 둘 다인데
+    언어 정보가 없어 화면에 영어 라벨이 섞여 나온다 — 조용히 다른 결과.
+    """
+    lines = (
+        f'<http://x/a> <{RDFS_LABEL}> "함께언급"@ko .\n'
+        f'<http://x/a> <{RDFS_LABEL}> "co-occurs with"@en .\n'
+        f'<http://x/a> <{RDFS_LABEL}> "무태그" .\n'
+    )
+    got = {(l["val"], l["lang"]) for l in _parse_literals(lines)}
+    assert got == {("함께언급", "ko"), ("co-occurs with", "en"), ("무태그", "")}, (
+        "언어태그가 보존돼야 ko/'' 필터를 재현할 수 있다"
+    )
+
+
+def test_literal_keeps_datatype():
+    """같은 정규식이 같은 방식으로 버리던 세 번째 항목 — 보존만 하고 소비자는 아직 없다."""
+    line = '<http://x/a> <http://x/p> "7"^^<http://www.w3.org/2001/XMLSchema#int> .'
+    lit = _parse_literals(line)[0]
+    assert lit["dtype"] == "http://www.w3.org/2001/XMLSchema#int"
+    assert lit["lang"] == "", "데이터타입 리터럴에 언어태그는 없다(RDF 상 배타)"
+
+
+def test_group_literals_by_key_does_not_re_drop_metadata():
+    """파서가 보존해도 배치 묶기에서 다시 버리면 수리가 무의미해진다."""
+    lines = (
+        f'<http://x/a> <{RDFS_LABEL}> "함께언급"@ko .\n'
+        f'<http://x/a> <{RDFS_LABEL}> "co-occurs with"@en .\n'
+    )
+    batch = _group_literals_by_key(_parse_literals(lines))["label"]
+    assert {(r["v"], r["lang"]) for r in batch} == {("함께언급", "ko"), ("co-occurs with", "en")}
+    assert all(r["p"] == RDFS_LABEL for r in batch)

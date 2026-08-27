@@ -16,8 +16,11 @@ from typing import Dict, List, Tuple
 _TRIPLE_RE = re.compile(r"<([^>]+)>\s+<([^>]+)>\s+<([^>]+)>\s*\.")
 
 # `<s> <p> "literal" .` — 언어태그(@ko)·데이터타입(^^<...>) 허용, 이스케이프(\" \\) 처리.
+# ⚠️ 태그는 **캡처**한다. 예전엔 비캡처로 흘려 LPG 에 언어 정보가 남지 않았고, 원본 browse
+# 질의의 FILTER(LANG(?x) = "ko" || LANG(?x) = "") 를 재현할 수 없었다(DEBTS §D-2).
+# RDF 상 언어태그와 데이터타입은 배타라 둘 중 하나만 채워진다(미기재 시 둘 다 "").
 _LITERAL_RE = re.compile(
-    r'<([^>]+)>\s+<([^>]+)>\s+"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?\s*\.'
+    r'<([^>]+)>\s+<([^>]+)>\s+"((?:[^"\\]|\\.)*)"(?:@([\w-]+)|\^\^<([^>]+)>)?\s*\.'
 )
 
 # property 키로 쓸 수 있는 안전한 이름(URI localname). 쿼리 조립 시 주입 차단.
@@ -64,25 +67,44 @@ def parse_triples(triple_lines: str) -> List[Tuple[str, str, str]]:
 
 
 def parse_literals(triple_lines: str) -> List[Dict[str, str]]:
-    """리터럴 트리플 → [{s, key, val}, ...]. LPG 에서 노드 property 가 된다.
+    """리터럴 트리플 → [{s, key, val, p, lang, dtype}, ...]. LPG 에서 노드 property 가 된다.
 
     키로 부적합한 술어(하이픈 등)는 건너뛴다 — 엉뚱한 키로 조용히 저장되는 것보다 낫다.
     ⚠️ 같은 (s, key) 에 값이 여럿일 수 있다(RDF 다중값). 호출부는 **덮어쓰지 말고 누적**할 것.
     실측 사고: coOccursWith 의 rdfs:label 이 "함께언급"·"co-occurs with" 둘 다였는데
     단일값으로 저장해 검색 결과 149건이 조용히 소실됐다.
+
+    `key` 는 localname 이라 **손실 있는 축약**이다(다른 네임스페이스의 같은 이름이 한 칸에
+    뭉친다). 원본은 `p` 에 그대로 둔다 — `node_properties` 가 `?p` 를 URI 로 돌려줘야 하는데
+    localname 에서 `NS_DOMAIN + key` 로 되살리면 네임스페이스를 **추측**하는 것이라
+    '회색지대 기본값 금지'에 어긋난다(DEBTS §D-2).
+
+    - `p`     : 술어 URI 원본 (항상 존재)
+    - `lang`  : 언어태그 without '@'. 없으면 ""
+    - `dtype` : 데이터타입 URI. 없으면 "" (RDF 상 lang 과 배타)
     """
     out: List[Dict[str, str]] = []
-    for (s, p, v) in _LITERAL_RE.findall(triple_lines):
+    for (s, p, v, lang, dtype) in _LITERAL_RE.findall(triple_lines):
         key = localname(p)
         if not _SAFE_KEY_RE.match(key):
             continue
-        out.append({"s": s, "key": key, "val": unescape(v)})
+        out.append({
+            "s": s, "key": key, "val": unescape(v),
+            "p": p, "lang": lang, "dtype": dtype,
+        })
     return out
 
 
 def group_literals_by_key(literals: List[Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
-    """키별 배치로 묶는다 — 동적 property 키는 쿼리 파라미터로 못 주므로 키마다 나눠 실행."""
+    """키별 배치로 묶는다 — 동적 property 키는 쿼리 파라미터로 못 주므로 키마다 나눠 실행.
+
+    `p`/`lang`/`dtype` 를 함께 통과시킨다. 파서가 보존한 것을 여기서 다시 버리면
+    수리가 무의미해진다(기존 소비자는 `s`/`v` 만 읽으므로 동작 불변).
+    """
     by_key: Dict[str, List[Dict[str, str]]] = {}
     for r in literals:
-        by_key.setdefault(r["key"], []).append({"s": r["s"], "v": r["val"]})
+        by_key.setdefault(r["key"], []).append({
+            "s": r["s"], "v": r["val"],
+            "p": r["p"], "lang": r["lang"], "dtype": r["dtype"],
+        })
     return by_key
