@@ -638,8 +638,9 @@ class Neo4jBackend:
                 f"DEBTS.md {cap.value} 항목(3층 LPG 재모델링) 대상."
             )
         # 그 외(구현 가능하나 PoC 미완, 예: rename_*)=NotImplementedError.
+        from xgen_graphstore.capabilities import implemented_methods
+
         raise NotImplementedError(
-            f"Neo4jBackend(PoC)는 '{name}' 미구현 — 구현 가능하나 PoC 스코프 밖. "
-            f"현재: insert_data/delete_data/triple_exists/count_node_triples/"
-            f"merge_move_subject/merge_move_object/health_check."
+            f"Neo4jBackend 는 '{name}' 미구현 — 능력 공백이 아니라 구현 가능·미완이다. "
+            f"현재 구현: {', '.join(implemented_methods(self))}"
         )

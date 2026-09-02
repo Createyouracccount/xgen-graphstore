@@ -417,4 +417,9 @@ class ArcadeBackend:
             raise CapabilityError(
                 f"backend 'arcade'(PoC)는 '{cap.value}' 능력 미구현 (메서드 '{name}')."
             )
-        raise NotImplementedError(f"ArcadeBackend(PoC)는 '{name}' 미구현.")
+        from xgen_graphstore.capabilities import implemented_methods
+
+        raise NotImplementedError(
+            f"ArcadeBackend 는 '{name}' 미구현 — 능력 공백이 아니라 구현 가능·미완이다. "
+            f"현재 구현: {', '.join(implemented_methods(self))}"
+        )

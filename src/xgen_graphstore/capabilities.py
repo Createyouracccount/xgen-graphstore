@@ -45,6 +45,28 @@ METHOD_CAPABILITY: dict[str, Capability] = {
 }
 
 
+def implemented_methods(store_or_cls) -> list:
+    """이 백엔드가 **실제로** 구현한 공개 메서드 이름. 진단 메시지용.
+
+    하드코딩하면 낡는다 — 실측(0830): Neo4jBackend 는 26개를 구현하는데
+    `__getattr__` 의 NotImplementedError 메시지는 7개만 광고하고 있었다(0823 검색 이식·
+    빌드 경로 이식 이전 목록). 그 메시지를 본 개발자는 fulltext·upload_ttl·
+    clean_subclassof_noise 가 없다고 오인한다.
+
+    ⚠️ `dir()`/`getattr()` 를 쓰면 백엔드의 `__getattr__` 가 다시 불려 재귀한다.
+    MRO 의 `vars()` 만 훑는다.
+    """
+    cls = store_or_cls if isinstance(store_or_cls, type) else type(store_or_cls)
+    out: set = set()
+    for base in cls.__mro__:
+        if base is object:
+            continue
+        for n, v in vars(base).items():
+            if not n.startswith("_") and callable(v):
+                out.add(n)
+    return sorted(out)
+
+
 def declared_capabilities(store) -> frozenset:
     return getattr(store, "CAPABILITIES", frozenset())
 
