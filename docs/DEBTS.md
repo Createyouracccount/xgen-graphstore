@@ -272,3 +272,74 @@ b1 의 추출본이 정본을 덮는다. 머지 전 게이트 통과(exit 0) 를
   `OntologyStore` **Protocol 선언 메서드인데 LPG 미구현**이다(패키지가 자기 계약 위반).
 - `ontology_build` neo4j 8/16 · arcade 2/16.
 - 이식 후 Neo4j·Arcade **파리티 재측정** — 기존 98~100% 는 낡은 기준선에 대한 값이다.
+
+---
+
+## H. 클래스 시드 파리티 — 해소분과 잔존분 (2026-09-04, `c303f70`·`6aad997`)
+
+3백엔드 교차 게이트를 실기동해 돌린 첫 회차. 공통 계약 메서드 **14개**(CORE_CRUD 6 +
+GRAPH_SEARCH 8) 중 시그니처 불일치는 `seed_classes_by_fulltext` **하나뿐**이었고, 해소했다.
+(`health_check` 는 `from __future__ import annotations` 로 인한 애노테이션 문자열화 차이라
+실질 동일.)
+
+### 해소
+- `mode` 파라미터 부재 → Fuseki 와 동일 이름·기본값으로 추가
+- 폐포 2종(동치 무방향 `*`, 이행 `subClassOf *`) 부재 → Cypher `[:REL*0.. {…}]` 로 구현
+- `graph_name` 무시 → 형제 메서드 관용구(`{g: $g}`)로 격리
+
+독립 참조구현(SPARQL 집합 의미론) 대조에서 험한 그래프(동치 3-사이클·역방향 동치·
+subClassOf 3단·다이아몬드·subClassOf 사이클·이중타입)로 **closure n=12 / direct n=5,
+3백엔드 완전 일치**. 게이트 변이 6종 주입에 6/6 검출.
+
+### 잔존 — 이 메서드 안에서 못 고침
+
+**H-1. 리터럴 계층은 여전히 graph 무관.** LPG 는 `label` 이 노드 property 라 graph 스코프가
+없다. 클래스/인스턴스의 `rdfs:label` 이 **다른 graph 에만** 있으면 Fuseki 는 행을 안 주는데
+LPG 는 준다(심판 프로브 B: fuseki 1행 vs LPG 2행 / 프로브 C: n=1 vs 2).
+인스턴스 다중라벨도 갈린다 — Fuseki `insts` 는 값 전부, LPG 는 `label[0]` 만.
+→ 리터럴에 `g` 를 다는 모델 변경이 필요하다. `graph_browse` 부채와 같은 뿌리.
+
+**H-2. `?directs` 는 운영 기본값에서 항상 죽어 있다.** `queries.py:355` 의
+`OPTIONAL { ?i rdf:type ?ceq . BIND(?il AS ?dl) }` 에서 `?il` 이 OPTIONAL 그룹 **밖** 바인딩이라
+BIND 가 성립하지 않는다. 라이브 Jena 실측: `mode=direct` 는 바인딩되고 `mode=closure` 는
+`directs` 키 자체가 없다 — **데이터 의존이 아니라 구조적**이다. 두 번째 원인도 있다:
+Jena `GROUP_CONCAT` 은 미바인딩을 건너뛰지 않고 전파하므로, 원인 1을 고쳐도 폐포로만
+도달한 인스턴스가 하나라도 있으면 사라진다(= 이 컬럼이 존재해야 할 바로 그 상황).
+
+`tests/test_golden_sealed.py:119-121` 이 두 모드 모두 **문자열만** 단언해 이걸 가려 왔다.
+소비처: 이 레포 0, develop 0. `lotte-poc/xgen-documents@6428c32`(ontology-search 계보)의
+`multi_turn_rag.py:1119-1121` 이 150캡 재정렬에 쓴다. 배포 설정은
+`ONTOLOGY_CLASS_SEED=closure`(xgen-infra full-stack .env 전부) — **필요한 유일한 모드에서
+죽은 분기**다. 고치려면 봉인 골든을 바꿔야 하므로 별건으로 둔다.
+
+**H-3. `arcade_backend.py:237` `_ft_nodes` 작은따옴표 인젝션.** SQL 리터럴이
+`'{_q(terms)}'` 인데 `_q`(43행)는 `\` 와 `"` 만 막고 `'` 를 막지 않는다. `seed_classes_by_fulltext`
+가 사용자 검색어를 그대로 넘기므로 실사용 표면이다. 심판 실측: 정상 4행 → 주입 시 30행.
+(`mode` 는 어디에도 보간되지 않고 분기 조건에만 쓰이므로 무관. `g = _q(graph_name)` 은
+큰따옴표 Cypher 리터럴이라 정합.)
+
+**H-4. ArcadeDB 경로 폭발.** SPARQL `*` 는 도달가능성이지만 Cypher `*0..` 는 경로 열거다.
+다이아몬드 계층 깊이별 실측(정답은 모든 깊이에서 동일):
+
+| depth | fuseki | neo4j | arcade |
+|---|---|---|---|
+| 4 | 75ms | 4ms | 29ms |
+| 16 | 70ms | 5ms | 1,220ms |
+| 20 | 52ms | 5ms | **16,009ms** |
+
+정확성 결함은 아니다. 실데이터 온톨로지의 subClassOf 깊이·다이아몬드 정도는 **미측정**.
+
+**H-5. 반환 봉투 불일치.** Fuseki 는 `['head','results']`, LPG 는 `['results']` 만 —
+`head.vars` 를 읽는 소비자는 깨진다. 값 타입도 소실된다:
+Fuseki `{"type":"literal","datatype":"…#integer","value":"12"}` vs LPG `{"type":"literal","value":"12"}`.
+
+### 게이트 커버리지
+교차 백엔드 라이브 게이트는 공통 14 중 **7** (CORE_CRUD 6 + `seed_classes_by_fulltext`).
+미커버 7종은 전부 GRAPH_SEARCH: `predicate_labels`, `seed_chunk_cooccurrence`,
+`seed_chunk_relations`, `seed_connectivity_relations`, `seed_relations_broad`,
+`seed_relations_by_fulltext_forward/reverse`. **결함 없음이 아니라 미측정이다.**
+
+### 게이트 운영
+백엔드 3종 실기동 필요. `pytest -m live`, env 는 `tests/test_cross_backend_swap.py` 상단 참조.
+ArcadeDB 는 최초 1회 DB 생성이 필요하다(`ArcadeBackend` 에 `ensure_dataset` 이 없다) —
+`POST /api/v1/server {"command":"create database xgen"}`.
