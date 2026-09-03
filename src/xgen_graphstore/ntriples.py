@@ -33,6 +33,7 @@ RDFS_LABEL = "http://www.w3.org/2000/01/rdf-schema#label"
 RDFS_SUBCLASS = "http://www.w3.org/2000/01/rdf-schema#subClassOf"
 RDFS_DOMAIN = "http://www.w3.org/2000/01/rdf-schema#domain"
 OWL_CLASS = "http://www.w3.org/2002/07/owl#Class"
+OWL_EQUIVALENT_CLASS = "http://www.w3.org/2002/07/owl#equivalentClass"
 OWL_OBJECT_PROPERTY = "http://www.w3.org/2002/07/owl#ObjectProperty"
 OWL_DATATYPE_PROPERTY = "http://www.w3.org/2002/07/owl#DatatypeProperty"
 # 원본 SPARQL 의 `FILTER(?t IN (owl:ObjectProperty, owl:DatatypeProperty))` 등가.

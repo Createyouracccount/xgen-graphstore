@@ -33,7 +33,9 @@ from xgen_graphstore.ntriples import (  # noqa: E402
     NS_DOMAIN as _NS_DOMAIN,
     EXCLUDED_PREDS as _EXCLUDED_PREDS,
     OWL_CLASS as _OWL_CLASS,
+    OWL_EQUIVALENT_CLASS as _OWL_EQ_CLASS,
     RDF_TYPE as _RDF_TYPE,
+    RDFS_SUBCLASS as _RDFS_SUBCLASS,
     parse_pin as _parse_pin,
 )
 
@@ -305,16 +307,27 @@ class ArcadeBackend:
     async def seed_relations_by_fulltext_reverse(self, graph_name: str, terms: str, pin: str):
         return await self._seed_pinned(graph_name, terms, pin, reverse=True)
 
-    async def seed_classes_by_fulltext(self, graph_name: str, terms: str):
-        """클래스 전수 시드: 상위30 시드 중 owl:Class + 인스턴스 집계(상위 3개)."""
+    async def seed_classes_by_fulltext(self, graph_name: str, terms: str,
+                                       mode: str = "closure"):
+        """클래스 전수 시드: 상위30 시드 중 owl:Class + 인스턴스 집계(상위 3개).
+
+        mode 는 Fuseki 와 같은 이름·기본값이다("closure"/"direct").
+        동치 폐포(무방향 `*0..`)는 두 모드 공통, 이행 폐포(subClassOf)는 closure 만 —
+        `queries.seed_classes_by_fulltext_query` 와 같은 구성이다.
+        """
         seeds = await self._ft_nodes(terms, 30)
         if not seeds:
             return self._bindings([])
         slist = self._uri_list(seeds)
+        g = _q(graph_name)
+        expand = (f'MATCH (sub:Resource)-[:REL*0.. {{p:"{_RDFS_SUBCLASS}", g:"{g}"}}]->(ceq) '
+                  if mode != "direct" else 'WITH c, ceq AS sub ')
         rows = await self._cmd(
-            f'MATCH (c:Resource)-[:REL {{p:"{_RDF_TYPE}"}}]->(:Resource {{uri:"{_OWL_CLASS}"}}) '
+            f'MATCH (c:Resource)-[:REL {{p:"{_RDF_TYPE}", g:"{g}"}}]->(:Resource {{uri:"{_OWL_CLASS}"}}) '
             f'WHERE c.uri IN [{slist}] AND c.label IS NOT NULL '
-            f'MATCH (i:Resource)-[:REL {{p:"{_RDF_TYPE}"}}]->(c) WHERE i.label IS NOT NULL '
+            f'MATCH (c)-[:REL*0.. {{p:"{_OWL_EQ_CLASS}", g:"{g}"}}]-(ceq:Resource) '
+            + expand +
+            f'MATCH (i:Resource)-[:REL {{p:"{_RDF_TYPE}", g:"{g}"}}]->(sub) WHERE i.label IS NOT NULL '
             'WITH c, count(DISTINCT i) AS n, collect(DISTINCT i.label[0]) AS ils '
             'RETURN c.label[0] AS cl, n, ils ORDER BY n DESC LIMIT 3') or []
         out = [{"cl": r.get("cl"), "n": r.get("n"),

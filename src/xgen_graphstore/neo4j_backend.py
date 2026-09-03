@@ -54,6 +54,7 @@ def _parse_triples(triple_lines: str) -> List[dict]:
 from xgen_graphstore.ntriples import (  # noqa: E402
     EXCLUDED_PREDS as _EXCLUDED_PREDS,
     OWL_CLASS as _OWL_CLASS,
+    OWL_EQUIVALENT_CLASS as _OWL_EQ_CLASS,
     PROPERTY_TYPES as _PROPERTY_TYPES,
     RDF_TYPE as _RDF_TYPE,
     RDFS_DOMAIN as _RDFS_DOMAIN,
@@ -490,22 +491,35 @@ class Neo4jBackend:
         )
         return self._bindings(rows)
 
-    async def seed_classes_by_fulltext(self, graph_name: str, terms: str):
+    async def seed_classes_by_fulltext(self, graph_name: str, terms: str,
+                                       mode: str = "closure"):
         """클래스 전수 시드: label 검색 상위30 중 owl:Class 인 것 + 인스턴스 집계.
 
         원본 반환: ?cl(클래스라벨) ?n(인스턴스수) ?insts(' | ' 구분 인스턴스라벨), 상위 3개.
         GROUP_CONCAT → Cypher collect + reduce 로 등가 구현.
+
+        mode 는 Fuseki 와 같은 이름·기본값이다("closure"/"direct").
+        `queries.seed_classes_by_fulltext_query` 의 폐포 2종을 그대로 옮긴다:
+        - 동치 폐포 `?c (owl:equivalentClass|^owl:equivalentClass)* ?ceq` → 무방향 `*0..`
+        - 이행 폐포 `?sub rdfs:subClassOf* ?ceq` (closure 에서만) → 방향 `*0..`
+        `*0..` 는 zero-length 포함이라 링크가 없으면 무변경(SPARQL `*` 와 동일).
         """
         seeds = await self._ft_nodes(terms, 30)
         if not seeds:
             return self._bindings([])
+        # 폐포 대상 클래스 집합. direct 는 동치까지만, closure 는 하위클래스까지.
+        expand = ("MATCH (sub:Resource)-[:REL*0.. {p: $sub_p, g: $g}]->(ceq) "
+                  if mode != "direct" else "WITH c, ceq AS sub ")
         rows = await self._run(
-            "MATCH (c:Resource)-[:REL {p: $type_p}]->(:Resource {uri: $owl_class}) "
+            "MATCH (c:Resource)-[:REL {p: $type_p, g: $g}]->(:Resource {uri: $owl_class}) "
             "WHERE c.uri IN $seeds AND c.label IS NOT NULL "
-            "MATCH (i:Resource)-[:REL {p: $type_p}]->(c) WHERE i.label IS NOT NULL "
+            "MATCH (c)-[:REL*0.. {p: $eq_p, g: $g}]-(ceq:Resource) "
+            + expand +
+            "MATCH (i:Resource)-[:REL {p: $type_p, g: $g}]->(sub) WHERE i.label IS NOT NULL "
             "WITH c, count(DISTINCT i) AS n, collect(DISTINCT i.label[0]) AS ils "
             "RETURN c.label[0] AS cl, n, ils ORDER BY n DESC LIMIT 3",
             seeds=seeds, type_p=_RDF_TYPE, owl_class=_OWL_CLASS,
+            eq_p=_OWL_EQ_CLASS, sub_p=_RDFS_SUBCLASS, g=graph_name,
         )
         out = [{"cl": r["cl"], "n": r["n"], "insts": " | ".join(x for x in (r["ils"] or []) if x)}
                for r in rows]

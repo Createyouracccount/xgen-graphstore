@@ -116,3 +116,59 @@ def test_swap_b5_fuseki_vs_arcade_identical():
     arc = _run(_b5_trace(_arcade(), f"{IN}swap-arc-b5"))
     assert fus == [2, 0, 2], f"fuseki trace off: {fus}"
     assert arc == fus, f"스왑 불일치 arcade={arc} vs fuseki={fus}"
+
+async def _seed_classes_trace(store, G, other_G, mode):
+    """클래스 시드 왕복: 폐포 2종이 필요한 데이터 + 다른 그래프 오염원.
+
+    `국가 owl:equivalentClass 나라`(동치), `광역시 rdfs:subClassOf 나라`(이행).
+    한국=직접 / 일본=동치로만 도달 / 서울=이행으로만 도달.
+    other_G 에 같은 클래스의 인스턴스를 넣어 graph 격리도 함께 본다.
+    """
+    RDFS, RDF_, OWL = ("http://www.w3.org/2000/01/rdf-schema#",
+                       "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+                       "http://www.w3.org/2002/07/owl#")
+    t = " ".join([
+        f'<{NS}국가> <{RDF_}type> <{OWL}Class> .', f'<{NS}나라> <{RDF_}type> <{OWL}Class> .',
+        f'<{NS}광역시> <{RDF_}type> <{OWL}Class> .',
+        f'<{NS}국가> <{RDFS}label> "국가" .', f'<{NS}나라> <{RDFS}label> "나라" .',
+        f'<{NS}광역시> <{RDFS}label> "광역시" .',
+        f'<{NS}국가> <{OWL}equivalentClass> <{NS}나라> .',
+        f'<{NS}광역시> <{RDFS}subClassOf> <{NS}나라> .',
+        f'<{IN}한국> <{RDF_}type> <{NS}국가> .', f'<{IN}한국> <{RDFS}label> "한국" .',
+        f'<{IN}일본> <{RDF_}type> <{NS}나라> .', f'<{IN}일본> <{RDFS}label> "일본" .',
+        f'<{IN}서울> <{RDF_}type> <{NS}광역시> .', f'<{IN}서울> <{RDFS}label> "서울" .'])
+    t2 = " ".join([
+        f'<{NS}국가> <{RDF_}type> <{OWL}Class> .', f'<{NS}국가> <{RDFS}label> "국가" .',
+        f'<{IN}유출국> <{RDF_}type> <{NS}국가> .', f'<{IN}유출국> <{RDFS}label> "유출국" .'])
+    for g, lines in ((G, t), (other_G, t2)):
+        await store.delete_data(g, lines)
+        await store.insert_data(g, lines)
+    try:
+        await store.ensure_fulltext_index()   # Fuseki 는 jena-text 설정이라 미보유
+    except Exception:
+        pass
+    res = await store.seed_classes_by_fulltext(G, "국가", mode=mode)
+    rows = res.get("results", {}).get("bindings", [])
+
+    def _v(row, k):
+        d = row.get(k)
+        return d.get("value") if isinstance(d, dict) else d
+    return [(_v(r, "cl"), str(_v(r, "n")), tuple(sorted((_v(r, "insts") or "").split(" | "))))
+            for r in rows]
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("closure", [("국가", "3", ("서울", "일본", "한국"))]),   # 직접+동치+이행
+    ("direct",  [("국가", "2", ("일본", "한국"))]),           # 직접+동치 (이행 없음)
+])
+def test_swap_seed_classes_identical(mode, expected):
+    """클래스 전수 시드 등가 — 폐포 2종 + graph 격리. 3백엔드 동일해야 한다.
+
+    `유출국`(다른 graph) 이 섞이면 격리 파손이다 — expected 에 없으므로 자동으로 걸린다.
+    """
+    G, OG = f"{IN}swap-seedcls", f"{IN}swap-seedcls-other"
+    fus = _run(_seed_classes_trace(_fuseki(), G, OG, mode))
+    assert fus == expected, f"fuseki trace off: {fus}"
+    for name, mk in (("neo4j", _neo4j), ("arcade", _arcade)):
+        got = _run(_seed_classes_trace(mk(), G, OG, mode))
+        assert got == fus, f"스왑 불일치 {name}={got} vs fuseki={fus}"
