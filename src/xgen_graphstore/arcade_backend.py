@@ -33,7 +33,7 @@ from xgen_graphstore.ntriples import (  # noqa: E402
     NS_DOMAIN as _NS_DOMAIN,
     EXCLUDED_PREDS as _EXCLUDED_PREDS,
     OWL_CLASS as _OWL_CLASS,
-    OWL_EQUIVALENT_CLASS as _OWL_EQ_CLASS,
+    OWL_EQUIVALENT_CLASS as _OWL_EQUIVALENT_CLASS,
     RDF_TYPE as _RDF_TYPE,
     RDFS_SUBCLASS as _RDFS_SUBCLASS,
     parse_pin as _parse_pin,
@@ -325,7 +325,7 @@ class ArcadeBackend:
         rows = await self._cmd(
             f'MATCH (c:Resource)-[:REL {{p:"{_RDF_TYPE}", g:"{g}"}}]->(:Resource {{uri:"{_OWL_CLASS}"}}) '
             f'WHERE c.uri IN [{slist}] AND c.label IS NOT NULL '
-            f'MATCH (c)-[:REL*0.. {{p:"{_OWL_EQ_CLASS}", g:"{g}"}}]-(ceq:Resource) '
+            f'MATCH (c)-[:REL*0.. {{p:"{_OWL_EQUIVALENT_CLASS}", g:"{g}"}}]-(ceq:Resource) '
             + expand +
             f'MATCH (i:Resource)-[:REL {{p:"{_RDF_TYPE}", g:"{g}"}}]->(sub) WHERE i.label IS NOT NULL '
             'WITH c, count(DISTINCT i) AS n, collect(DISTINCT i.label[0]) AS ils '

@@ -54,7 +54,7 @@ def _parse_triples(triple_lines: str) -> List[dict]:
 from xgen_graphstore.ntriples import (  # noqa: E402
     EXCLUDED_PREDS as _EXCLUDED_PREDS,
     OWL_CLASS as _OWL_CLASS,
-    OWL_EQUIVALENT_CLASS as _OWL_EQ_CLASS,
+    OWL_EQUIVALENT_CLASS as _OWL_EQUIVALENT_CLASS,
     PROPERTY_TYPES as _PROPERTY_TYPES,
     RDF_TYPE as _RDF_TYPE,
     RDFS_DOMAIN as _RDFS_DOMAIN,
@@ -519,7 +519,7 @@ class Neo4jBackend:
             "WITH c, count(DISTINCT i) AS n, collect(DISTINCT i.label[0]) AS ils "
             "RETURN c.label[0] AS cl, n, ils ORDER BY n DESC LIMIT 3",
             seeds=seeds, type_p=_RDF_TYPE, owl_class=_OWL_CLASS,
-            eq_p=_OWL_EQ_CLASS, sub_p=_RDFS_SUBCLASS, g=graph_name,
+            eq_p=_OWL_EQUIVALENT_CLASS, sub_p=_RDFS_SUBCLASS, g=graph_name,
         )
         out = [{"cl": r["cl"], "n": r["n"], "insts": " | ".join(x for x in (r["ils"] or []) if x)}
                for r in rows]

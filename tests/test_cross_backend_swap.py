@@ -120,26 +120,46 @@ def test_swap_b5_fuseki_vs_arcade_identical():
 async def _seed_classes_trace(store, G, other_G, mode):
     """클래스 시드 왕복: 폐포 2종이 필요한 데이터 + 다른 그래프 오염원.
 
-    `국가 owl:equivalentClass 나라`(동치), `광역시 rdfs:subClassOf 나라`(이행).
-    한국=직접 / 일본=동치로만 도달 / 서울=이행으로만 도달.
-    other_G 에 같은 클래스의 인스턴스를 넣어 graph 격리도 함께 본다.
+    한 픽스처로 아래를 전부 건드린다(변이를 넣었을 때 실제로 걸리도록):
+    - 정방향 동치 `A≡B` → i2 가 동치로만 도달
+    - **역방향 동치** `D≡A` → i4 는 `^owl:equivalentClass` 로만 도달. 없으면 무방향 `-` 를
+      방향 `->` 로 바꿔도 통과한다.
+    - 이행 `C⊑B` → i3 가 이행으로만 도달
+    - **다이아몬드** `E⊑C` + `E⊑B` → i5 에 도달하는 경로가 2개. 없으면
+      `count(DISTINCT i)`→`count(i)`, `collect(DISTINCT …)`→`collect(…)` 변이가 안 걸린다
+      (SPARQL `*` 는 도달가능성, Cypher `*0..` 는 경로 열거라 중복이 생긴다).
+    - **두 번째 매칭 클래스** `A2`(같은 라벨, 인스턴스 1개) → 결과 행이 2개라
+      `LIMIT 3`→`LIMIT 1` 변이가 걸린다. n 이 달라 정렬은 결정적이다.
+    - other_G 에 같은 클래스의 인스턴스를 넣어 graph 격리도 함께 본다.
+
+    ⚠️ 라벨은 **고유 토큰**(zq9m)이다. `_ft_nodes` 는 graph 스코프가 없어 전문색인이
+    전역이므로, 흔한 낱말을 쓰면 다른 그래프·이전 실행의 동명 노드가 상위 30을 채워
+    시드가 밀려난다(실측: '국가'로 두 번째 클래스가 사라짐). 토큰을 바꾸지 말 것.
+
+    ⚠️ 미덮음: 리터럴(label)은 아직 graph 스코프가 없다 — label 이 **다른 graph 에만**
+    있으면 LPG 가 Fuseki 보다 더 준다. 그 축과 한국어 토큰화 차이는 이 테스트 밖이다.
     """
     RDFS, RDF_, OWL = ("http://www.w3.org/2000/01/rdf-schema#",
                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
                        "http://www.w3.org/2002/07/owl#")
+    cls = lambda u, l: (f'<{NS}{u}> <{RDF_}type> <{OWL}Class> . '
+                        f'<{NS}{u}> <{RDFS}label> "{l}" .')
+    ins = lambda u, c, l: (f'<{IN}{u}> <{RDF_}type> <{NS}{c}> . '
+                           f'<{IN}{u}> <{RDFS}label> "{l}" .')
     t = " ".join([
-        f'<{NS}국가> <{RDF_}type> <{OWL}Class> .', f'<{NS}나라> <{RDF_}type> <{OWL}Class> .',
-        f'<{NS}광역시> <{RDF_}type> <{OWL}Class> .',
-        f'<{NS}국가> <{RDFS}label> "국가" .', f'<{NS}나라> <{RDFS}label> "나라" .',
-        f'<{NS}광역시> <{RDFS}label> "광역시" .',
-        f'<{NS}국가> <{OWL}equivalentClass> <{NS}나라> .',
-        f'<{NS}광역시> <{RDFS}subClassOf> <{NS}나라> .',
-        f'<{IN}한국> <{RDF_}type> <{NS}국가> .', f'<{IN}한국> <{RDFS}label> "한국" .',
-        f'<{IN}일본> <{RDF_}type> <{NS}나라> .', f'<{IN}일본> <{RDFS}label> "일본" .',
-        f'<{IN}서울> <{RDF_}type> <{NS}광역시> .', f'<{IN}서울> <{RDFS}label> "서울" .'])
-    t2 = " ".join([
-        f'<{NS}국가> <{RDF_}type> <{OWL}Class> .', f'<{NS}국가> <{RDFS}label> "국가" .',
-        f'<{IN}유출국> <{RDF_}type> <{NS}국가> .', f'<{IN}유출국> <{RDFS}label> "유출국" .'])
+        cls("zq9mA", "zq9m base"), cls("zq9mA2", "zq9m base"),
+        # B·C·D·E 는 시드가 아니다 — 폐포로만 도달해야 하므로 검색 토큰을 안 넣는다.
+        cls("zq9mB", "beta"), cls("zq9mC", "gamma"),
+        cls("zq9mD", "delta"), cls("zq9mE", "epsilon"),
+        f'<{NS}zq9mA> <{OWL}equivalentClass> <{NS}zq9mB> .',      # 정방향 동치
+        f'<{NS}zq9mD> <{OWL}equivalentClass> <{NS}zq9mA> .',      # 역방향 동치
+        f'<{NS}zq9mC> <{RDFS}subClassOf> <{NS}zq9mB> .',          # 이행
+        f'<{NS}zq9mE> <{RDFS}subClassOf> <{NS}zq9mC> .',          # 다이아몬드 경로 1
+        f'<{NS}zq9mE> <{RDFS}subClassOf> <{NS}zq9mB> .',          # 다이아몬드 경로 2
+        ins("zq9mi1", "zq9mA", "i1"), ins("zq9mi2", "zq9mB", "i2"),
+        ins("zq9mi3", "zq9mC", "i3"), ins("zq9mi4", "zq9mD", "i4"),
+        ins("zq9mi5", "zq9mE", "i5"), ins("zq9mi6", "zq9mA2", "i6")])
+    t2 = " ".join([cls("zq9mA", "zq9m base"), ins("zq9mLeak", "zq9mA", "leak")])
     for g, lines in ((G, t), (other_G, t2)):
         await store.delete_data(g, lines)
         await store.insert_data(g, lines)
@@ -147,7 +167,7 @@ async def _seed_classes_trace(store, G, other_G, mode):
         await store.ensure_fulltext_index()   # Fuseki 는 jena-text 설정이라 미보유
     except Exception:
         pass
-    res = await store.seed_classes_by_fulltext(G, "국가", mode=mode)
+    res = await store.seed_classes_by_fulltext(G, "zq9m", mode=mode)
     rows = res.get("results", {}).get("bindings", [])
 
     def _v(row, k):
@@ -158,13 +178,18 @@ async def _seed_classes_trace(store, G, other_G, mode):
 
 
 @pytest.mark.parametrize("mode,expected", [
-    ("closure", [("국가", "3", ("서울", "일본", "한국"))]),   # 직접+동치+이행
-    ("direct",  [("국가", "2", ("일본", "한국"))]),           # 직접+동치 (이행 없음)
+    # A: 직접 i1 / 동치 i2·i4(역방향) / 이행 i3·i5(다이아몬드) → 5
+    # A2: 자기 인스턴스 i6 1개 (LIMIT 변이 검출용 두 번째 행)
+    ("closure", [("zq9m base", "5", ("i1", "i2", "i3", "i4", "i5")),
+                 ("zq9m base", "1", ("i6",))]),
+    # direct 는 이행 폐포가 없다 — 동치까지만(i1·i2·i4)
+    ("direct",  [("zq9m base", "3", ("i1", "i2", "i4")),
+                 ("zq9m base", "1", ("i6",))]),
 ])
 def test_swap_seed_classes_identical(mode, expected):
     """클래스 전수 시드 등가 — 폐포 2종 + graph 격리. 3백엔드 동일해야 한다.
 
-    `유출국`(다른 graph) 이 섞이면 격리 파손이다 — expected 에 없으므로 자동으로 걸린다.
+    other_G 의 `leak` 이 섞이면 격리 파손이다 — expected 에 없으므로 자동으로 걸린다.
     """
     G, OG = f"{IN}swap-seedcls", f"{IN}swap-seedcls-other"
     fus = _run(_seed_classes_trace(_fuseki(), G, OG, mode))
