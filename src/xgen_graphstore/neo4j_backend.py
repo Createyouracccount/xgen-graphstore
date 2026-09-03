@@ -466,11 +466,15 @@ class Neo4jBackend:
             "WHERE s.uri IN $seeds AND o.uri IN $seeds AND s.uri <> o.uri "
             "  AND s.label IS NOT NULL AND o.label IS NOT NULL "
             "  AND NOT r.p IN $excl "
+            # 0824: 정밀 시드에선 동시출현 약관계를 제외한다 — coarse 엣지의 LIMIT 선점
+            # 방지(원본 `FILTER(?p != :coOccursWith)`). broad recall 폴백에는 포함한다.
+            "  AND r.p <> $cooc "
             "OPTIONAL MATCH (p:Resource {uri: r.p}) "
             "WITH s, o, coalesce(p.label, [null]) AS pls "
             "UNWIND s.label AS sLabel UNWIND pls AS pLabel UNWIND o.label AS oLabel "
             "RETURN DISTINCT sLabel, pLabel, oLabel LIMIT $lim",
-            g=graph_name, seeds=seeds, excl=_EXCLUDED_PREDS, lim=int(limit),
+            g=graph_name, seeds=seeds, excl=_EXCLUDED_PREDS, cooc=_COOC_URI,
+            lim=int(limit),
         )
         return self._bindings(rows)
 

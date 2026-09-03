@@ -215,3 +215,74 @@ def test_arcade_fulltext_term_is_not_injectable():
     for payload in ("nomatchxyz' OR '1'='1", 'nomatchxyz" OR "1"="1'):
         got = _run(store._ft_nodes(payload, 30))
         assert got == [], f"검색어로 질의가 변조됐다: {payload!r} → {len(got)}건"
+
+
+_P1 = f"{NS}wk7pAcquire"
+_P2 = f"{NS}wk7pLocate"
+_COOC = f"{NS}coOccursWith"
+
+
+async def _graph_search_trace(store, G, other_G, method, args):
+    """GRAPH_SEARCH 7종 공통 픽스처 — 관계 3개 + 동시출현 1개 + 청크 소속.
+
+    `wk7A -acquires-> wk7B -located in-> wk7C -acquires-> wk7D` 사슬에
+    `wk7A -coOccursWith-> wk7C` 를 얹는다. 동시출현은 슬롯이 갈린다:
+    connectivity(정밀)는 **제외**, broad(recall 폴백)는 **포함**, chunk_cooccurrence 는
+    그것만 본다. 셋이 같은 데이터에서 다른 답을 내야 한다 — 하나라도 필터가 빠지면 걸린다.
+
+    other_G 에 같은 라벨 토큰의 관계를 하나 더 둔다 — graph 필터가 빠지면 시드 양끝이
+    모두 매칭돼 결과에 섞인다(격리 변이 검출용).
+
+    라벨 토큰은 고유(wk7)여야 한다. `_ft_nodes` 는 graph 스코프가 없어 전문색인이 전역이다.
+    """
+    RDFS, NS_ = "http://www.w3.org/2000/01/rdf-schema#", NS
+    def node(u, label, chunks=()):
+        out = [f'<{IN}{u}> <{RDFS}label> "{label}" .']
+        out += [f'<{IN}{u}> <{NS_}sourceChunk> "{c}" .' for c in chunks]
+        return " ".join(out)
+    t = " ".join([
+        node("wk7A", "wk7 alpha", ["ck7-1"]), node("wk7B", "wk7 beta", ["ck7-1"]),
+        node("wk7C", "wk7 gamma", ["ck7-2"]), node("wk7D", "wk7 delta"),
+        f'<{_P1}> <{RDFS}label> "acquires" .', f'<{_P2}> <{RDFS}label> "located in" .',
+        f'<{_COOC}> <{RDFS}label> "co-occurs with" .',
+        f'<{IN}wk7A> <{_P1}> <{IN}wk7B> .', f'<{IN}wk7B> <{_P2}> <{IN}wk7C> .',
+        f'<{IN}wk7C> <{_P1}> <{IN}wk7D> .', f'<{IN}wk7A> <{_COOC}> <{IN}wk7C> .'])
+    t2 = " ".join([
+        node("wk7A", "wk7 alpha"), node("wk7E", "wk7 epsilon", ["ck7-1"]),
+        f'<{IN}wk7A> <{_P1}> <{IN}wk7E> .'])
+    for g, lines in ((G, t), (other_G, t2)):
+        await store.delete_data(g, lines)
+        await store.insert_data(g, lines)
+    try:
+        await store.ensure_fulltext_index()
+    except Exception:
+        pass
+    res = await getattr(store, method)(G, *args)
+    rows = res.get("results", {}).get("bindings", []) if isinstance(res, dict) else res
+    return sorted(tuple(sorted((k, (v.get("value") if isinstance(v, dict) else v))
+                               for k, v in (r or {}).items())) for r in rows)
+
+
+@pytest.mark.parametrize("method,args,rows", [
+    ("predicate_labels",                   (),                          3),
+    ("seed_chunk_relations",               ('"ck7-1" "ck7-2"', 40),     3),
+    ("seed_chunk_cooccurrence",            ('"ck7-1" "ck7-2"', 40),     1),
+    # 정밀 시드 — 동시출현 제외라 3 (포함하면 4). 이 1 차이가 필터 누락을 잡는다.
+    ("seed_connectivity_relations",        ("wk7", 40),                 3),
+    # recall 폴백 — 동시출현 포함이라 4
+    ("seed_relations_broad",               ("wk7", 40),                 4),
+    ("seed_relations_by_fulltext_forward", ("wk7", '"acquires"'),       2),
+    ("seed_relations_by_fulltext_reverse", ("wk7", '"acquires"'),       2),
+])
+def test_swap_graph_search_identical(method, args, rows):
+    """GRAPH_SEARCH 등가 — 3백엔드가 같은 데이터에 같은 답을 내야 한다.
+
+    `rows` 는 양성 대조다. 0 이 아니어야 배선이 살아 있다는 뜻이고, 그래야
+    "3백엔드 동일"이 의미를 갖는다(양쪽 다 죽어도 동일은 나온다).
+    """
+    G, OG = f"{IN}swap-gsearch", f"{IN}swap-gsearch-other"
+    fus = _run(_graph_search_trace(_fuseki(), G, OG, method, args))
+    assert len(fus) == rows, f"fuseki {method} 행수 {len(fus)} != {rows}: {fus}"
+    for name, mk in (("neo4j", _neo4j), ("arcade", _arcade)):
+        got = _run(_graph_search_trace(mk(), G, OG, method, args))
+        assert got == fus, f"스왑 불일치 {method}/{name}={got} vs fuseki={fus}"

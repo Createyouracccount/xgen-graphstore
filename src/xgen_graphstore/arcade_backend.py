@@ -244,17 +244,21 @@ class ArcadeBackend:
         return ",".join(f'"{_q(u)}"' for u in uris)
 
     async def _seed_relations(self, graph_name: str, seeds: List[str], limit: int,
-                              both_ends: bool):
-        """connectivity(양끝)/broad(단끝) 공통 본체 — 시드 범위만 다르다."""
+                              both_ends: bool, exclude_cooc: bool):
+        """connectivity(양끝)/broad(단끝) 공통 본체 — 시드 범위와 동시출현 처리만 다르다."""
         if not seeds:
             return self._bindings([])
         g, slist = _q(graph_name), self._uri_list(seeds)
         excl = ",".join(f'"{_q(p)}"' for p in _EXCLUDED_PREDS)
         end_cond = (f"AND o.uri IN [{slist}] AND s.uri <> o.uri " if both_ends else "")
+        # 0824: 정밀 시드(connectivity)에선 동시출현 약관계를 제외한다 — coarse 엣지의
+        # LIMIT 선점 방지(원본 `FILTER(?p != :coOccursWith)`). broad 폴백에는 포함한다.
+        cooc_cond = (f'  AND r.p <> "{_q(_COOC_URI)}" ' if exclude_cooc else "")
         head = (
             f'MATCH (s:Resource)-[r:REL {{g:"{g}"}}]->(o:Resource) '
             f'WHERE s.uri IN [{slist}] {end_cond}'
             f'  AND s.label IS NOT NULL AND o.label IS NOT NULL AND NOT r.p IN [{excl}] '
+            f'{cooc_cond}'
         )
         # ArcadeDB 는 관계패턴 뒤 OPTIONAL MATCH 가 r 을 참조하면 조인이 조용히 실패한다.
         # → label 보유/미보유 두 갈래로 나눠 합친다(seed_chunk_relations 와 동일 우회).
@@ -278,12 +282,14 @@ class ArcadeBackend:
     async def seed_connectivity_relations(self, graph_name: str, terms: str, limit: int):
         """연결성 시드: 주어·목적어 **양끝** 모두 상위80 시드에 들어야 한다."""
         return await self._seed_relations(
-            graph_name, await self._ft_nodes(terms, 80), limit, both_ends=True)
+            graph_name, await self._ft_nodes(terms, 80), limit,
+            both_ends=True, exclude_cooc=True)
 
     async def seed_relations_broad(self, graph_name: str, terms: str, limit: int):
         """recall 폴백: **주어만** 상위60 시드에 들면 된다."""
         return await self._seed_relations(
-            graph_name, await self._ft_nodes(terms, 60), limit, both_ends=False)
+            graph_name, await self._ft_nodes(terms, 60), limit,
+            both_ends=False, exclude_cooc=False)
 
     async def _seed_pinned(self, graph_name: str, terms: str, pin: str, reverse: bool):
         """정밀관계(정/역) 공통 — 상위15 시드 + 술어라벨 핀."""
