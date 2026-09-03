@@ -234,7 +234,9 @@ class ArcadeBackend:
         if not terms or not terms.strip():
             return []
         res = await self._cmd(
-            f"SELECT uri FROM Resource WHERE labelText CONTAINSTEXT '{_q(terms)}' "
+            # 리터럴을 큰따옴표로 둔다 — _q 는 `\\`·`"` 만 막는 **큰따옴표용**이라
+            # 작은따옴표 리터럴에 쓰면 검색어로 질의가 변조된다(실측: 매칭 0인 낱말도 30행).
+            f'SELECT uri FROM Resource WHERE labelText CONTAINSTEXT "{_q(terms)}" '
             f"LIMIT {int(top_n)}", language="sql")
         return [r["uri"] for r in (res or []) if r.get("uri")]
 

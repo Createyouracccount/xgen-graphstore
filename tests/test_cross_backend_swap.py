@@ -197,3 +197,21 @@ def test_swap_seed_classes_identical(mode, expected):
     for name, mk in (("neo4j", _neo4j), ("arcade", _arcade)):
         got = _run(_seed_classes_trace(mk(), G, OG, mode))
         assert got == fus, f"스왑 불일치 {name}={got} vs fuseki={fus}"
+
+
+def test_arcade_fulltext_term_is_not_injectable():
+    """검색어가 질의를 바꾸지 못한다 — ArcadeDB 전문검색은 SQL 문자열 보간이라 회귀하기 쉽다.
+
+    양성 대조로 배선이 살아 있음을 먼저 보이고(매칭되는 낱말 → 결과 있음),
+    매칭이 0인 낱말에 주입 payload 를 붙였을 때 여전히 0인지 본다.
+    수정 전에는 30행이 나왔다(질의가 변조되어 전체가 반환됨).
+    """
+    store = _arcade()
+    G = f"{IN}swap-seedcls"
+    # 픽스처를 깔아 양성 대조 대상을 만든다.
+    _run(_seed_classes_trace(store, G, f"{IN}swap-seedcls-other", "closure"))
+    hit = _run(store._ft_nodes("zq9m", 30))
+    assert hit, "양성 대조 실패 — 전문검색 배선이 죽었다면 아래 0 은 의미가 없다"
+    for payload in ("nomatchxyz' OR '1'='1", 'nomatchxyz" OR "1"="1'):
+        got = _run(store._ft_nodes(payload, 30))
+        assert got == [], f"검색어로 질의가 변조됐다: {payload!r} → {len(got)}건"
