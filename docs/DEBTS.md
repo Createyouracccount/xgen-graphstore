@@ -299,6 +299,22 @@ LPG 는 준다(심판 프로브 B: fuseki 1행 vs LPG 2행 / 프로브 C: n=1 vs
 인스턴스 다중라벨도 갈린다 — Fuseki `insts` 는 값 전부, LPG 는 `label[0]` 만.
 → 리터럴에 `g` 를 다는 모델 변경이 필요하다. `graph_browse` 부채와 같은 뿌리.
 
+**H-1b (0904 추가). 같은 뿌리로 `count_node_triples` 가 갈린다.** 게이트의 B4 픽스처는
+관계만 있어 이 축을 못 봤다. 실데이터의 노드는 항상 `rdfs:label` 을 갖는다. 실측:
+
+| 데이터 | fuseki | neo4j | arcade |
+|---|---|---|---|
+| 관계만 (게이트 픽스처) | 1 | 1 | 1 |
+| 관계 + 라벨 1개 | **2** | 1 | 1 |
+| 관계 + 라벨 2개 | **3** | 1 | 1 |
+
+RDF 는 라벨도 트리플, LPG 는 노드 속성이라 세지 않는다. LPG 가 속성 값 개수를 함께
+세면 맞출 수 있다(`uri` 는 식별자라 제외). `test_swap_count_node_triples_with_literals`
+에 `xfail(strict=True)` 로 걸어 뒀다 — 고치면 xpass 로 뒤집혀 마크를 지우게 된다.
+
+이것이 **"설정 한 줄로 백엔드 교체"의 현재 한계**다. 계약 14/14 가 게이트를 통과하지만
+그 픽스처들이 리터럴 축을 덮지 않는다.
+
 **H-2. `?directs` 는 운영 기본값에서 항상 죽어 있다.** `queries.py:355` 의
 `OPTIONAL { ?i rdf:type ?ceq . BIND(?il AS ?dl) }` 에서 `?il` 이 OPTIONAL 그룹 **밖** 바인딩이라
 BIND 가 성립하지 않는다. 라이브 Jena 실측: `mode=direct` 는 바인딩되고 `mode=closure` 는

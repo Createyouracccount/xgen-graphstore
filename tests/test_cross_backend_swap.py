@@ -286,3 +286,36 @@ def test_swap_graph_search_identical(method, args, rows):
     for name, mk in (("neo4j", _neo4j), ("arcade", _arcade)):
         got = _run(_graph_search_trace(mk(), G, OG, method, args))
         assert got == fus, f"스왑 불일치 {method}/{name}={got} vs fuseki={fus}"
+
+
+@pytest.mark.xfail(strict=True, reason="DEBTS H-1: RDF 는 리터럴도 트리플, LPG 는 노드 속성 "
+                                       "— count_node_triples 가 갈린다. 모델 변경 필요")
+def test_swap_count_node_triples_with_literals():
+    """리터럴이 붙은 노드의 트리플 수 — 지금은 갈린다.
+
+    게이트의 B4 픽스처는 관계만 있어 이 축을 못 본다. 실데이터의 노드는 항상
+    `rdfs:label` 을 갖는다. 실측:
+        관계만        fuseki 1 / neo4j 1 / arcade 1   ✓
+        관계+라벨1개  fuseki 2 / neo4j 1 / arcade 1   ✗
+        관계+라벨2개  fuseki 3 / neo4j 1 / arcade 1   ✗
+    LPG 가 노드 속성 값 개수를 함께 세면 맞출 수 있다(`uri` 는 식별자라 제외).
+    고치면 이 테스트가 xfail→xpass 로 뒤집혀 strict 로 걸린다 — 그때 마크를 지울 것.
+    """
+    RDFS = "http://www.w3.org/2000/01/rdf-schema#"
+    G = f"{IN}swap-litcount"
+    t = f'<{IN}lc1> <{NS}lcP> <{IN}lc2> . <{IN}lc1> <{RDFS}label> "alpha" .'
+
+    async def _trace(store):
+        await store.delete_data(G, t)
+        await store.insert_data(G, t)
+        n = await store.count_node_triples(G, f"{IN}lc1")
+        try:
+            await store.close()
+        except Exception:
+            pass
+        return n
+
+    fus = _run(_trace(_fuseki()))
+    assert fus == 2, f"fuseki trace off: {fus}"   # 관계 1 + 라벨 1
+    for name, mk in (("neo4j", _neo4j), ("arcade", _arcade)):
+        assert _run(_trace(mk())) == fus, f"리터럴 계층 불일치 {name}"
