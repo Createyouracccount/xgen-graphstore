@@ -220,6 +220,7 @@ def test_arcade_fulltext_term_is_not_injectable():
 _P1 = f"{NS}wk7pAcquire"
 _P2 = f"{NS}wk7pLocate"
 _COOC = f"{NS}coOccursWith"
+_SRC_CHUNK = f"{NS}sourceChunk"   # _EXCLUDED_PREDS 소속
 
 
 async def _graph_search_trace(store, G, other_G, method, args):
@@ -246,7 +247,14 @@ async def _graph_search_trace(store, G, other_G, method, args):
         f'<{_P1}> <{RDFS}label> "acquires" .', f'<{_P2}> <{RDFS}label> "located in" .',
         f'<{_COOC}> <{RDFS}label> "co-occurs with" .',
         f'<{IN}wk7A> <{_P1}> <{IN}wk7B> .', f'<{IN}wk7B> <{_P2}> <{IN}wk7C> .',
-        f'<{IN}wk7C> <{_P1}> <{IN}wk7D> .', f'<{IN}wk7A> <{_COOC}> <{IN}wk7C> .'])
+        f'<{IN}wk7C> <{_P1}> <{IN}wk7D> .', f'<{IN}wk7A> <{_COOC}> <{IN}wk7C> .',
+        # 주어만 시드 토큰을 갖는 관계 — connectivity(양끝)는 배제, broad(단끝)는 포함.
+        # 없으면 양끝→단끝 변이가 안 걸린다.
+        node("outsider", "zz9 outsider"),
+        f'<{IN}wk7A> <{_P2}> <{IN}outsider> .',
+        # 제외술어가 엣지로 존재 — 시드 결과에 나오면 안 된다(_EXCLUDED_PREDS).
+        # 없으면 제외목록 교체 변이가 안 걸린다.
+        f'<{IN}wk7A> <{_SRC_CHUNK}> <{IN}wk7B> .'])
     t2 = " ".join([
         node("wk7A", "wk7 alpha"), node("wk7E", "wk7 epsilon", ["ck7-1"]),
         f'<{IN}wk7A> <{_P1}> <{IN}wk7E> .'])
@@ -265,12 +273,14 @@ async def _graph_search_trace(store, G, other_G, method, args):
 
 @pytest.mark.parametrize("method,args,rows", [
     ("predicate_labels",                   (),                          3),
-    ("seed_chunk_relations",               ('"ck7-1" "ck7-2"', 40),     3),
+    # outsider 관계도 wk7A 의 청크(ck7-1)에 걸린다
+    ("seed_chunk_relations",               ('"ck7-1" "ck7-2"', 40),     4),
     ("seed_chunk_cooccurrence",            ('"ck7-1" "ck7-2"', 40),     1),
     # 정밀 시드 — 동시출현 제외라 3 (포함하면 4). 이 1 차이가 필터 누락을 잡는다.
     ("seed_connectivity_relations",        ("wk7", 40),                 3),
     # recall 폴백 — 동시출현 포함이라 4
-    ("seed_relations_broad",               ("wk7", 40),                 4),
+    # 단끝 시드라 outsider 행이 포함된다 — connectivity 3 과 갈려야 한다
+    ("seed_relations_broad",               ("wk7", 40),                 5),
     ("seed_relations_by_fulltext_forward", ("wk7", '"acquires"'),       2),
     ("seed_relations_by_fulltext_reverse", ("wk7", '"acquires"'),       2),
 ])

@@ -358,6 +358,8 @@ class ArcadeBackend:
             f'MATCH (s:Resource)-[r:REL {{g:"{g}"}}]->(o:Resource) '
             f'WHERE s.sourceChunk IS NOT NULL AND any(c IN s.sourceChunk WHERE c IN [{clist}]) '
             f'  AND s.label IS NOT NULL AND o.label IS NOT NULL '
+            # 원본 `_PRED_FILTER` 등가 — 구조·프로비넌스 술어는 시드 결과에서 뺀다.
+            f'  AND NOT r.p IN [{",".join(chr(34) + _q(p) + chr(34) for p in _EXCLUDED_PREDS)}] '
             # 0824: 정본이 정밀 SVO 와 동시출현 약관계를 슬롯 분리한다(coarse 엣지의
             # LIMIT 선점 방지). 동시출현 슬롯은 seed_chunk_cooccurrence.
             f'  AND r.p <> "{_q(_COOC_URI)}" '

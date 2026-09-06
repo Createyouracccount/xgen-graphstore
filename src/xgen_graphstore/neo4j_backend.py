@@ -549,6 +549,8 @@ class Neo4jBackend:
         rows = await self._run(
             "MATCH (s:Resource)-[r:REL {g: $g}]->(o:Resource) "
             "WHERE s.sourceChunk IS NOT NULL AND any(c IN s.sourceChunk WHERE c IN $chunks) "
+            # 원본 `_PRED_FILTER` 등가 — 구조·프로비넌스 술어는 시드 결과에서 뺀다.
+            "  AND NOT r.p IN $excl "
             "  AND s.label IS NOT NULL AND o.label IS NOT NULL "
             # 0824: 정본이 정밀 SVO 와 동시출현 약관계를 슬롯 분리한다. 이 슬롯에서
             # coOccursWith 를 빼지 않으면 coarse 엣지가 LIMIT 를 선점한다.
@@ -558,7 +560,7 @@ class Neo4jBackend:
             "UNWIND s.label AS sLabel UNWIND pls AS pLabel UNWIND o.label AS oLabel "
             "RETURN DISTINCT sLabel, pLabel, oLabel "
             "LIMIT $limit",
-            g=graph_name, chunks=chunks, limit=int(limit), cooc=_COOC_URI,
+            g=graph_name, excl=_EXCLUDED_PREDS, chunks=chunks, limit=int(limit), cooc=_COOC_URI,
         )
         return self._bindings(rows)
 
